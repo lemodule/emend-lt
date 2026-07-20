@@ -27,6 +27,9 @@ pub struct PatternMatch {
     /// Marker span (what a rule highlights / a disambig rule targets).
     pub marker_from_token: usize,
     pub marker_to_token: usize,
+    /// For each pattern token (element), the sentence-token index where it began
+    /// matching — resolves `\N` backreferences (`\1` = `element_start[0]`).
+    pub element_start: Vec<usize>,
 }
 
 impl Pattern {
@@ -69,6 +72,7 @@ impl Pattern {
             to_token: end,
             marker_from_token: mf,
             marker_to_token: mt,
+            element_start: rec.iter().map(|(s, _)| *s).collect(),
         })
     }
 

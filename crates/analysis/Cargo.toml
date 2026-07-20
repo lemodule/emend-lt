@@ -16,3 +16,11 @@ quick-xml = "0.41"
 [[bin]]
 name = "analyze"
 path = "src/bin/analyze.rs"
+
+[[bin]]
+name = "grammar-examples"
+path = "src/bin/grammar_examples.rs"
+
+[[bin]]
+name = "check-text"
+path = "src/bin/check_text.rs"

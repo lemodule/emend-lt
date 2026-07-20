@@ -68,6 +68,10 @@ pub fn parse_pattern(xml: &str, default_case_sensitive: bool) -> Result<ParsedPa
                 b"exception" => {
                     cur_exc = Some(TokenBuild::from_attrs(&e.attributes(), default_case_sensitive))
                 }
+                // `<token><match/></token>` is a token-level backreference; the
+                // matcher has no such feature, so flag it (else the token would
+                // silently become match-anything).
+                b"match" if cur.is_some() => note(&mut unsupported, "token-match"),
                 _ => {}
             },
             Ok(Event::Empty(e)) => match e.local_name().as_ref() {
@@ -84,6 +88,7 @@ pub fn parse_pattern(xml: &str, default_case_sensitive: bool) -> Result<ParsedPa
                         tok.exceptions.push(b);
                     }
                 }
+                b"match" if cur.is_some() => note(&mut unsupported, "token-match"),
                 _ => {}
             },
             Ok(Event::Text(t)) => {

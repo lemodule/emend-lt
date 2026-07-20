@@ -22,6 +22,11 @@ serving the same `/v2/check` HTTP contract. **English-first.** Oracle for every 
   1,500-sentence corpus. The whole remaining gap is the **chunker**: either a rule that reads a
   `chunk` (skipped), or a *cascade* — a supported rule mis-firing because a chunk-based rule
   upstream didn't run to narrow the readings it sees. 11 tests pass.
+- **1.4 Grammar engine** (`crates/analysis` `grammar.rs`) — `grammar.xml` `<rule>`s on the same
+  matcher, emitting `/v2/check` `matches[]`. 3,159 of 5,529 rules supported (rest need `<match>` /
+  Java `<filter>`). **96.0%** of supported rules pass their own `<example>` cases; **95.9%
+  precision** vs the live `/v2/check` on real text (recall 42%, gap = `<match>` suggestions). 13
+  tests pass.
 
 Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on `main`).
 
@@ -44,7 +49,19 @@ Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on 
   Needed both for chunk-reading rules and to stop the *cascade* false positives above (supported
   rules that see un-narrowed readings). Deferrable per Phase 0 (fired rules skew away from
   chunk-heavy style rules).
-- [ ] **3. Phase 1.4 grammar engine** on the same matcher: `<rule>` + `<message>` + `<suggestion>` + `<match>` + antipatterns; emit `matches[]`. Start with the Phase 0 top English rules (`MODAL_OF`, `THERE_THEIR`, `BASE_FORM`, `EN_A_VS_AN`, …). Oracle = `POST /v2/check`.
+- [~] **3. Phase 1.4 grammar engine** (`crates/analysis` `grammar.rs`) — **MVP DONE.** Parses
+  `category`/`rulegroup`/`rule` + `<pattern>` + `<antipattern>`s + `<message>`/`<suggestion>`
+  (literal text + `\N` backrefs) + `<example>`; emits `matches[]` (char offset/length, replacements,
+  message, rule id, category id). Honors `default="off"`/`tags="picky"` (skipped at level=default),
+  overlap filtering (drops contained matches), and LT suggestion case-preservation. Flags & skips
+  rules needing `<match>` (in a token, message, or suggestion) or a Java `<filter class=>`.
+  - **Verified**: 96.0% of supported rules pass their own `<example correction=>` cases (LT's own
+    test corpus); vs the live `POST /v2/check` on real text, **precision 95.9%**, recall 42%
+    (`bin/grammar-examples`, `bin/check-text`). Exact offset/length/replacements parity confirmed
+    on MODAL_OF, THEIR_IS, etc.
+  - **Recall gap = `<match>` support** (POS/case transforms in suggestions): CAPITALIZATION,
+    LOWERCASE_NAMES, AI, ID_CASING, the proper-noun/case rules. That's the next lever. Then Java
+    `<filter>` classes (71 rules, e.g. MultitokenSpellerFilter) and `<match>`-in-token backrefs.
 - [ ] **4. Hand-coded English rules** (1.5): `EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, `SPURIOUS_APOSTROPHE`, etc. (see `docs/phase0-scope.md`).
 - [ ] **5. Chunker** (`chunk`/`chunk_re`, 818 grammar patterns) — OpenNLP phrase chunker, a separate subsystem. Deferrable: Phase 0 fired rules skew away from chunk-heavy style rules.
 - [ ] **6. Phase 2** — wrap in an `axum`/`hyper` server exposing `/v2/check` + `/v2/languages`, honoring `disabledRules`/`disabledCategories` and echoing `--allow-origin`.

@@ -171,12 +171,47 @@ The single remaining gap (deliberately deferred, not silently wrong — flagged 
 the OpenNLP phrase chunker, a separate subsystem). `<and>`/`<or>` groups and scoped exceptions are
 now supported. 18 unit tests cover the token + sequence + parser + entity semantics.
 
+## 1.4 — Grammar engine ✅ MVP done (96% of examples, 95.9% precision vs /v2/check)
+
+`crates/analysis/grammar.rs` runs `en/grammar.xml` `<rule>`s on the shared matcher and emits the
+`/v2/check` `matches[]`. Full pipeline: text → segment → tokenize → tag → disambiguate → grammar.
+
+- **Parse** (`parse_grammar_rules`): `category` → `rulegroup` → `rule`, capturing `<pattern>` +
+  rule- and rulegroup-level `<antipattern>`s (shared matcher), `<message>` + `<suggestion>`s
+  (literal text + `\N` backrefs), and `<example correction=>`. Rules that need `<match>` (in a
+  token, message, or suggestion) or a Java `<filter class=>` are flagged unsupported and skipped;
+  so are `default="off"` / `tags="picky"` rules (off at `level=default`).
+- **Emit** (`check_sentence`): marker char offset/length in the full text, `\N`-expanded
+  `replacements[]`, the rendered message, rule id + category id. LT quirks reproduced: **suggestion
+  case-preservation** (capitalize a lowercase suggestion when the match is uppercase-initial) and
+  **overlap filtering** (drop a match whose span is contained in another's — e.g. COULD_OF inside
+  MODAL_OF).
+
+**Oracle** = LT's own `<example correction=>` (authoritative — it's what `PatternRuleTest` checks)
+plus the live `POST /v2/check`:
+
+| Check | Result |
+|---|---|
+| supported rules (of 5,529) | 3,159 |
+| positive `<example>`s firing correctly | **96.0%** (3919/4084) |
+| negative `<example>`s (rule must not fire) | **97.5%** |
+| vs live `/v2/check` on real text | **precision 95.9%**, recall 42% |
+
+Exact offset/length/replacements parity confirmed against the running server on MODAL_OF,
+THEIR_IS, etc. The **recall gap is entirely `<match>`-in-suggestion rules** (CAPITALIZATION,
+LOWERCASE_NAMES, AI, ID_CASING, proper-noun/case rules) — POS/case transforms, the next feature.
+Tools: `bin/grammar-examples` (self-oracle), `bin/check-text` (full pipeline → matches).
+
+**Bug the oracle caught (same class as the disambig `&quot;` one):** `<token><match no='0'/></token>`
+is a token-level backreference; the matcher has no such feature, so it was silently becoming a
+match-anything token and `ADVERB_VERB_ADVERB_REPETITION` fired ~360× on random text. Now flagged.
+
 ## Next (English)
 
-- ~~1.3b Disambiguator~~ ✅ done (`crates/analysis`). ~~`<and>`/`<or>` + scoped exceptions~~ ✅ done.
-- **OpenNLP chunker** in the matcher — the last matcher feature; the entire remaining
-  disambiguation/grammar parity gap (chunk-reading rules + cascades).
-- 1.4 XML pattern-rule engine (`en/grammar.xml`) — reuses the same matcher; the long pole.
+- ~~1.3b Disambiguator~~ ✅. ~~`<and>`/`<or>` + scoped exceptions~~ ✅. ~~1.4 grammar engine (MVP)~~ ✅.
+- **`<match>` element** (POS/case transforms in suggestions; token backrefs) — the grammar
+  recall lever. Then Java `<filter>` classes (71 rules) and the **OpenNLP chunker** (last matcher
+  feature; the disambiguation cascade gap).
 - 1.5 hand-coded English rules (`EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, …).
 - Known raw-tagger edge (not disambiguation): hyphenated plurals like `four-year-olds` get one
   fewer NNS reading than LT (LT also emits a self-lemma `four-year-olds/NNS`).

@@ -1,0 +1,14 @@
+[package]
+name = "morfologik"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Reader for Morfologik CFSA2 finite-state-automaton dictionaries (LanguageTool's .dict format)"
+
+[[bin]]
+name = "fsa-dump"
+path = "src/bin/fsa_dump.rs"
+
+[[bin]]
+name = "dict-lookup"
+path = "src/bin/dict_lookup.rs"

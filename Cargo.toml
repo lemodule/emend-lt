@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/morfologik"]
+
+[workspace.package]
+edition = "2021"
+license = "LGPL-2.1"
+repository = "https://github.com/armandmeunier/emend-lt"

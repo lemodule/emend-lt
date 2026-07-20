@@ -1,0 +1,104 @@
+{
+  "_note": "Phase 0 probe corpus. Each entry is error-laden text meant to trigger a broad set of LanguageTool rules for its language variant. This is a seed set — extend it as differential testing (Phase 3) surfaces uncovered rules. Language codes match what the app sends.",
+  "en-US": [
+    "I has a apple and she dont like it.",
+    "Their going to there house over they're.",
+    "Its a nice day, but the dog wagged it's tail.",
+    "Me and him went to the store yesterday.",
+    "I could of gone if I would of known.",
+    "The team are winning there game.",
+    "She is more taller than her brother.",
+    "We was late becuase the traffic was bad.",
+    "Between you and I, this dont make sense.",
+    "He didnt do nothing wrong at all.",
+    "An historic event occured on the 1st of janurary.",
+    "The affect of the medecine was noticable immediatly.",
+    "Your welcome to join us, alot of people are comming.",
+    "This sentence have too many error's in it.",
+    "The cat, that i saw, was very fat.",
+    "I want to loose weight and definately excercise more."
+  ],
+  "en-GB": [
+    "I has a apple and she dont like it.",
+    "Their going to there house over they're.",
+    "The colour of the theatre was grey, i think.",
+    "She is more taller than her brother.",
+    "We was late becuase the traffic was bad.",
+    "He could of gone if he would of known.",
+    "This sentence have too many error's in it."
+  ],
+  "en-AU": [
+    "I has a apple and she dont like it.",
+    "Their going to there house.",
+    "We was late becuase the traffic was bad.",
+    "This sentence have too many error's in it."
+  ],
+  "en-CA": [
+    "I has a apple and she dont like it.",
+    "Their going to there house.",
+    "We was late becuase the traffic was bad.",
+    "This sentence have too many error's in it."
+  ],
+  "fr": [
+    "Je vais a la maison malgres la pluie.",
+    "Il a manger une pomme se matin.",
+    "Sa fait deux jour que je l'attend.",
+    "Les enfant sont aller au parc.",
+    "Je pense que sa va allez mieux demin.",
+    "Elle a bien comprit la lecon d'hier.",
+    "On ne peut pas savoir ceci a l'avance.",
+    "Il faut que tu fait attention a toi."
+  ],
+  "de-DE": [
+    "Ich habe gestern ein Buch gelest.",
+    "Er geht in der Schule jeden Tag.",
+    "Das ist ein sehr schönes Haus, oder?",
+    "Wir haben viel Spass gehabt am Wochenende.",
+    "Sie hat mir das Buch gegeben, das ich gewollt habe.",
+    "Ich bin sicher das du recht hast.",
+    "Der Hund lauft schnell durch der Garten."
+  ],
+  "de-AT": [
+    "Ich habe gestern ein Buch gelest.",
+    "Wir haben viel Spass gehabt am Wochenende.",
+    "Ich bin sicher das du recht hast."
+  ],
+  "de-CH": [
+    "Ich habe gestern ein Buch gelest.",
+    "Wir haben viel Spass gehabt am Wochenende.",
+    "Ich bin sicher dass du recht hast."
+  ],
+  "es": [
+    "Ayer fui al cine con migo y me gusto mucho.",
+    "El niño no a comido nada en todo el dia.",
+    "Habian muchas personas en la fiesta.",
+    "Espero que tu vengas manana temprano.",
+    "Me e dado cuenta de que estaba equivocado.",
+    "Nosotros fuimos a la playa el sabado pasado."
+  ],
+  "pt-PT": [
+    "Eu fui ao mercado e comprei muita fruta boa.",
+    "Ela nao gosta de acordar sedo de manha.",
+    "Nos vamos viajar para o norte no proximo mes.",
+    "Espero que tu venhas a festa amanha."
+  ],
+  "pt-BR": [
+    "Eu fui no mercado e comprei muita fruta boa.",
+    "Ela nao gosta de acordar cedo de manha.",
+    "A gente vai viajar pro norte mes que vem.",
+    "Espero que voce venha na festa amanha."
+  ],
+  "it": [
+    "Ieri sono andato al cinema con i miei amici.",
+    "Lei non a mangiato niente per tutto il giorno.",
+    "Cera molta gente alla festa di sabato.",
+    "Spero che tu venga domani mattina presto.",
+    "Noi siamo andati al mare la settimana scorsa."
+  ],
+  "pl": [
+    "Wczoraj poszedlem do kina z moimi przyjaciolmi.",
+    "Ona nie zjadla nic przez caly dzien.",
+    "Na imprezie bylo bardzo duzo ludzi.",
+    "Mam nadzieje ze przyjdziesz jutro rano."
+  ]
+}

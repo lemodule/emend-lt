@@ -40,7 +40,7 @@ Plus: spelling membership (`becuase`/`occured` → false), SUFFIX POS decode
 `Dr.`/`p.m.`/`U.S.A.`/`Ph.D.`/`No. 5`/`vol.`, ellipses, nested quotes/brackets, tabs, multiple
 spaces): **46/46 and 40/40 sentences byte-identical, zero diffs.**
 
-### Word tokenizer — implemented; full verification gated on 1.3
+### Word tokenizer ✅ done & verified byte-exact (with the 1.3 tagger wired in)
 
 `crates/tokenizer` — a port of LT's `EnglishWordTokenizer`: the `[wordChars]+|[^wordChars]`
 split, the apostrophe-shielding dance, the four contraction patterns (`n't`, `'s`, `'re`, …),
@@ -49,13 +49,15 @@ leading/trailing-hyphen handling, and the base `joinEMails`/`joinUrls` re-mergin
 **Second finding — a real coupling:** LT's word tokenizer **calls the POS tagger**. Inside
 `wordsToAdd`, a token containing `-`/`'` is kept whole iff `EnglishTagger.isTagged(...)`
 recognises it — this is why `don't → [do, n't]` keeps `n't` whole, and `o'clock` stays one
-token. So byte-exact word tokenization is intrinsically **downstream of Phase 1.3** (the
-tagger), which itself builds on the 1.1 FSA reader.
+token. The tagger is injected as a `WordTagger` trait; with the real 1.3 tagger backing it,
+tokenization is verified **byte-identical to LT across 58 sentences** (three corpora:
+contractions, possessives, hyphenation, URLs, emails, `o'clock`, `rock'n'roll`, …).
 
-The tagger is therefore injected as a `WordTagger` trait. The tokenizer is complete now; unit
-tests with a stub tagger confirm the mechanism (`don't→[do, n't]`, URL/email joining,
-punctuation/space splitting, trailing hyphen). The full-corpus oracle diff runs once the real
-tagger (1.3) is wired in.
+**Bug the differential harness caught (exactly the roadmap's point):** LT's `URL_CHARS`
+pattern `[…$-_…]` is a *range* `$`–`_` (covers `:`, `;`, `=`, `?`, `@`, …). An initial
+mistranslation escaped the hyphen into three literals, which silently broke joining of
+`https://`/`ftp://` URLs while `www.` URLs still worked. The oracle diff flagged it on exactly
+two probes; fixed in `url_chars()`.
 
 ## Reproduce
 
@@ -71,9 +73,36 @@ diff oracle.txt rust.txt
 cargo test        # morfologik (3) + segmenter (3) + tokenizer (4)
 ```
 
+## 1.3 — POS tagger + disambiguator
+
+### POS tagger ✅ done & verified byte-exact
+
+`crates/tagger` — a port of LT's `EnglishTagger` (extends `BaseTagger`) on the 1.1 reader:
+per-word case-variant fallbacks (exact → lowercase → all-caps-proper-noun), the `in'→ing`
+fallback, and typographic-apostrophe folding.
+
+**Third finding:** the word tagger is not the bare FSA — LT wraps it in a `CombiningTagger`
+that overlays `en/added.txt` (manual additions) and subtracts `en/removed.txt`. Effective
+readings are `(dict ∪ added) − removed`, and it does **not** dedup (a form in both the dict
+and `added.txt` yields the reading twice, e.g. `climbdowns`). This was discovered by two
+mismatches (`emphasis`, `climbdowns`) in the first parity run and then resolved.
+
+**Verified byte-identical to LT's `EnglishTagger` over 3,025 words** (3,000 random inflected
+forms from the dictionary + case variants, contractions, and OOV words): zero diffs on the
+full `lemma/POS` reading multiset per word.
+
+### Disambiguator — next unit (scoped)
+
+`en/disambiguation.xml` is a **761-rule / 104-rulegroup** engine (actions: 358 `replace`,
+80 `filter`, 75 `remove`, 75 `add`, 25 `filterall`, 2 `unify`; 2,182 regexp token attrs,
+761 antipatterns, unification, markers). It reads token-pattern semantics **identical to the
+Phase 1.4 `grammar.xml` engine**. The plan is to build the token-pattern matcher **once** as a
+shared component and drive both the disambiguator and the grammar rules from it, rather than
+implementing pattern matching twice. Ground truth is LT's analyzed sentence
+(`JLanguageTool.getAnalyzedSentence`, post-disambiguation).
+
 ## Next (English)
 
-- **1.3 POS tagger + disambiguator** — uses the 1.1 reader (`english.dict`) +
-  `en/disambiguation.xml`. Unblocks byte-exact word tokenization.
-- 1.4 XML pattern-rule engine (`en/grammar.xml`) — the long pole.
+- **1.3b Disambiguator** — the shared token-pattern matcher + `disambiguation.xml`.
+- 1.4 XML pattern-rule engine (`en/grammar.xml`) — reuses the same matcher; the long pole.
 - 1.5 hand-coded English rules (`EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, …).

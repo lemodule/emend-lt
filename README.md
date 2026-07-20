@@ -13,9 +13,11 @@ See the roadmap in [`languagetool-rust.md`](languagetool-rust.md).
 - **Phase 0 — scope**: done. See [`docs/phase0-scope.md`](docs/phase0-scope.md).
 - **Phase 1.1 — Morfologik FSA reader (English)**: done, verified byte-exact vs Morfologik's
   own Java decompiler.
-- **Phase 1.2 — SRX sentence splitter (English)**: done, verified byte-identical to LT's
-  `SRXSentenceTokenizer` (40 tricky probes). Word tokenizer implemented; its full
-  verification is gated on the 1.3 tagger (LT's tokenizer calls the tagger).
+- **Phase 1.2 — SRX sentence splitter + word tokenizer (English)**: done, both verified
+  byte-identical to LT (sentence splits over 40 probes; word tokenization over 58 sentences).
+- **Phase 1.3 — POS tagger (English)**: done, verified byte-identical to LT's `EnglishTagger`
+  over 3,025 words. The **disambiguator** (`disambiguation.xml`, 761 rules) is the next unit —
+  it shares its token-pattern matcher with the 1.4 `grammar.xml` engine.
 
 See [`docs/phase1-english.md`](docs/phase1-english.md). Focus is **English-first** to reach
 end-to-end parity as a proof point before other languages.
@@ -25,6 +27,7 @@ end-to-end parity as a proof point before other languages.
 - `crates/morfologik` — CFSA2 `.dict` reader + dictionary lookup (spelling + POS).
 - `crates/segmenter` — SRX sentence segmentation (`segment.srx`).
 - `crates/tokenizer` — English word tokenizer (tagger injected as a trait).
+- `crates/tagger` — English POS tagger (Morfologik + `added.txt`/`removed.txt`).
 - `tools/phase0` — rule-scope enumeration harness.
 - `docs/` — per-phase results.
 

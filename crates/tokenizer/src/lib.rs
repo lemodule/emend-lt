@@ -59,7 +59,9 @@ fn contraction_patterns() -> &'static [Regex] {
 
 fn url_chars() -> &'static Regex {
     static P: OnceLock<Regex> = OnceLock::new();
-    P.get_or_init(|| Regex::new(r"^[a-zA-ZÄÖÜäöü0-9/%$\-_.+!*'(),?#~]+$").unwrap())
+    // NB: `$-_` is a RANGE (U+0024..U+005F) in LT's Java pattern — it covers `:`,
+    // `;`, `=`, `?`, `@`, digits, uppercase, etc. Do not escape the hyphen.
+    P.get_or_init(|| Regex::new(r"^[a-zA-ZÄÖÜäöü0-9/%$-_.+!*'(),?#~]+$").unwrap())
 }
 fn domain_chars() -> &'static Regex {
     static P: OnceLock<Regex> = OnceLock::new();

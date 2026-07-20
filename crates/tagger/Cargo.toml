@@ -1,0 +1,18 @@
+[package]
+name = "tagger"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "English POS tagger compatible with LanguageTool's EnglishTagger (Morfologik-backed)"
+
+[dependencies]
+morfologik = { path = "../morfologik" }
+tokenizer = { path = "../tokenizer" }
+
+[[bin]]
+name = "tag-words"
+path = "src/bin/tag_words.rs"
+
+[[bin]]
+name = "tokenize"
+path = "src/bin/tokenize.rs"

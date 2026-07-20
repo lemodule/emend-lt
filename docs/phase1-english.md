@@ -91,15 +91,40 @@ mismatches (`emphasis`, `climbdowns`) in the first parity run and then resolved.
 forms from the dictionary + case variants, contractions, and OOV words): zero diffs on the
 full `lemma/POS` reading multiset per word.
 
-### Disambiguator — next unit (scoped)
+### Disambiguator — needs the shared matcher below first
 
 `en/disambiguation.xml` is a **761-rule / 104-rulegroup** engine (actions: 358 `replace`,
-80 `filter`, 75 `remove`, 75 `add`, 25 `filterall`, 2 `unify`; 2,182 regexp token attrs,
-761 antipatterns, unification, markers). It reads token-pattern semantics **identical to the
-Phase 1.4 `grammar.xml` engine**. The plan is to build the token-pattern matcher **once** as a
-shared component and drive both the disambiguator and the grammar rules from it, rather than
-implementing pattern matching twice. Ground truth is LT's analyzed sentence
-(`JLanguageTool.getAnalyzedSentence`, post-disambiguation).
+80 `filter`, 75 `remove`, 75 `add`, 25 `filterall`, 2 `unify`). Its token-pattern semantics are
+**identical to the Phase 1.4 `grammar.xml` engine**, so the matcher is built once and shared.
+Ground truth is LT's analyzed sentence (`JLanguageTool.getAnalyzedSentence`).
+
+## Shared token-pattern matcher (serves 1.3b disambiguation + 1.4 grammar)
+
+`crates/matcher` — the common `<pattern>`/`<token>` matching core both rule formats compile to.
+
+- **Data model** (`analyzed.rs`): `AnalyzedToken` (surface/lemma/POS reading),
+  `AnalyzedTokenReadings` (a position with all readings + whitespace context + SENT_START).
+- **Token matcher** (`token.rs`): LT's `PatternToken.isMatched` exactly — string test
+  (literal/regexp, `case_sensitive`, `inflected`→lemma, `negate`), POS test
+  (`postag`/`postag_regexp`, `UNKNOWN`, `negate_pos`), `spacebefore`, and `<exception>`s
+  (current scope), combined with the `XOR` negation logic.
+- **Sequence matcher** (`pattern.rs`): greedy backtracking over `min`/`max`/`skip`, with
+  `<marker>` bounds tracked through the actual matched token path.
+- **Parser** (`parse.rs`) + **entity expansion** (`entities.rs`): compiles `<pattern>` XML,
+  first expanding the files' `<!ENTITY>` regex-fragment macros (96 in grammar, 11 in
+  disambiguation — e.g. `&uncommon_verbs;` used 169×), which quick-xml does not do itself.
+
+**Validated against real data** (`pattern-coverage` bin over the actual English files):
+
+| File | Patterns | Parse OK | Fully supported by current features |
+|---|---|---|---|
+| `grammar.xml` | 5,543 | 5,542 | 4,697 (**84.7%**) |
+| `disambiguation.xml` | 1,063 | 1,061 | 874 (**82.2%**) |
+
+Quantified gaps (deliberately deferred, not silently wrong — flagged per pattern via
+`ParsedPattern::unsupported`): **`chunk`/`chunk_re`** (818 grammar / 86 disambiguation — needs
+the OpenNLP phrase chunker, a separate subsystem) and **`<and>`/`<or>` token groups** (49 /
+111). 16 unit tests cover the token + sequence + parser + entity semantics.
 
 ## Next (English)
 

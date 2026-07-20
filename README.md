@@ -16,8 +16,11 @@ See the roadmap in [`languagetool-rust.md`](languagetool-rust.md).
 - **Phase 1.2 — SRX sentence splitter + word tokenizer (English)**: done, both verified
   byte-identical to LT (sentence splits over 40 probes; word tokenization over 58 sentences).
 - **Phase 1.3 — POS tagger (English)**: done, verified byte-identical to LT's `EnglishTagger`
-  over 3,025 words. The **disambiguator** (`disambiguation.xml`, 761 rules) is the next unit —
-  it shares its token-pattern matcher with the 1.4 `grammar.xml` engine.
+  over 3,025 words.
+- **Shared token-pattern matcher**: the `<pattern>`/`<token>` core that both
+  `disambiguation.xml` (1.3b) and `grammar.xml` (1.4) compile to — token + sequence matching,
+  XML + `<!ENTITY>` expansion. Validated against real English files: ~84% of patterns fully
+  supported today; the rest use `chunk` (needs the OpenNLP chunker) or `<and>`/`<or>` groups.
 
 See [`docs/phase1-english.md`](docs/phase1-english.md). Focus is **English-first** to reach
 end-to-end parity as a proof point before other languages.
@@ -28,6 +31,7 @@ end-to-end parity as a proof point before other languages.
 - `crates/segmenter` — SRX sentence segmentation (`segment.srx`).
 - `crates/tokenizer` — English word tokenizer (tagger injected as a trait).
 - `crates/tagger` — English POS tagger (Morfologik + `added.txt`/`removed.txt`).
+- `crates/matcher` — shared token-pattern matcher for disambiguation + grammar rules.
 - `tools/phase0` — rule-scope enumeration harness.
 - `docs/` — per-phase results.
 

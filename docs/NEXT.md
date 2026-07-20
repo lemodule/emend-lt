@@ -11,16 +11,17 @@ serving the same `/v2/check` HTTP contract. **English-first.** Oracle for every 
 - **1.2 SRX sentence splitter** (`crates/segmenter`) — 40 probes identical to `SRXSentenceTokenizer`.
 - **1.2 word tokenizer** (`crates/tokenizer`) — 58 sentences identical (needs the tagger).
 - **1.3 POS tagger** (`crates/tagger`) — 3,025 words identical to `EnglishTagger`.
-- **Shared token-pattern matcher** (`crates/matcher`) — token+sequence match, XML + `<!ENTITY>`
-  expansion; **80.1% grammar / 80.4% disambiguation** patterns fully supported (down from a
-  previously-reported 84.7/82.2% because `exception scope=` and uncompilable regexes are now
-  *flagged* instead of silently mis-run). 16 tests pass.
+- **Shared token-pattern matcher** (`crates/matcher`) — token+sequence match, `<and>`/`<or>`
+  groups, `<exception scope="previous|next">`, XML + `<!ENTITY>` expansion; **85.2% grammar /
+  91.7% disambiguation** patterns fully supported. The **only** remaining unsupported feature is
+  the OpenNLP `chunk`/`chunk_re` (818 grammar / 86 disambig). 18 tests pass.
 - **1.3b Disambiguator action layer** (`crates/analysis`) — parses `en/disambiguation.xml`
   (rule/rulegroup + `<disambig>` + `<wd>` + `<antipattern>`), applies the actions in document
   order over the analyzed sentence. **Raw analysis (`getRawAnalyzedSentence`) is byte-identical**
-  to Java LT; post-disambiguation **token-reading parity ≈ 85.9%** over a 1,500-sentence corpus,
-  the gap being the same deferred matcher features (chunk / and-or / scope-exceptions), with
-  ~zero genuine false positives. 9 tests pass.
+  to Java LT; post-disambiguation **token-reading parity ≈ 89.6% / sentence parity 32%** over a
+  1,500-sentence corpus. The whole remaining gap is the **chunker**: either a rule that reads a
+  `chunk` (skipped), or a *cascade* — a supported rule mis-firing because a chunk-based rule
+  upstream didn't run to narrow the readings it sees. 11 tests pass.
 
 Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on `main`).
 
@@ -33,10 +34,16 @@ Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on 
   `oracle/AnalyzedOracle.java` (mode `raw`/`dis`, isolates `XmlRuleDisambiguator`), diffed by
   `crates/analysis/src/bin/analyze.rs`. See phase1-english.md §1.3b for the exact action semantics
   and gotchas (they bit us repeatedly).
-- [ ] **2. `<and>`/`<or>` token groups** in the matcher (49 grammar / 111 disambig patterns). Cheap;
-  lifts coverage. **Also implement `<exception scope="previous|next">`** (313 grammar / 33 disambig
-  patterns now flagged unsupported) and the OpenNLP **chunker** — those three are the whole
-  disambiguation parity gap.
+- [x] **2. `<and>`/`<or>` token groups + `<exception scope="previous|next">`** in the matcher —
+  **DONE** (`crates/matcher` `token.rs`/`parse.rs`). Lifted coverage to 85.2% grammar / 91.7%
+  disambig and disambiguation parity 85.9%→89.6%. `<and>`/`<or>` = one position that must satisfy
+  all/any children; scope exceptions test the prev/next token. The remaining gap is the **chunker**
+  only.
+- [ ] **2b. OpenNLP phrase chunker** (`chunk`/`chunk_re`, 818 grammar / 86 disambig). The last
+  matcher feature — a separate subsystem (OpenNLP maxent models in `libs/opennlp-chunk-models.jar`).
+  Needed both for chunk-reading rules and to stop the *cascade* false positives above (supported
+  rules that see un-narrowed readings). Deferrable per Phase 0 (fired rules skew away from
+  chunk-heavy style rules).
 - [ ] **3. Phase 1.4 grammar engine** on the same matcher: `<rule>` + `<message>` + `<suggestion>` + `<match>` + antipatterns; emit `matches[]`. Start with the Phase 0 top English rules (`MODAL_OF`, `THERE_THEIR`, `BASE_FORM`, `EN_A_VS_AN`, …). Oracle = `POST /v2/check`.
 - [ ] **4. Hand-coded English rules** (1.5): `EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, `SPURIOUS_APOSTROPHE`, etc. (see `docs/phase0-scope.md`).
 - [ ] **5. Chunker** (`chunk`/`chunk_re`, 818 grammar patterns) — OpenNLP phrase chunker, a separate subsystem. Deferrable: Phase 0 fired rules skew away from chunk-heavy style rules.

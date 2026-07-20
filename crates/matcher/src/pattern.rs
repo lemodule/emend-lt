@@ -90,7 +90,7 @@ impl Pattern {
 
         // Count consecutive matches available from ti (capped at max_c).
         let mut avail = 0usize;
-        while ti + avail < len && avail < max_c && pt.matches_position(&tokens[ti + avail]) {
+        while ti + avail < len && avail < max_c && pt.matches_context(tokens, ti + avail) {
             avail += 1;
         }
         if avail < min_c {

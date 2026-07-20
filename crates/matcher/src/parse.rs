@@ -8,7 +8,7 @@
 //! rules they cannot yet run faithfully.
 
 use crate::pattern::Pattern;
-use crate::token::{PosMatcher, StringMatcher, TokenMatcher};
+use crate::token::{GroupKind, PosMatcher, Scope, StringMatcher, TokenMatcher};
 use quick_xml::events::{attributes::Attributes, BytesStart, Event};
 use quick_xml::Reader;
 
@@ -29,12 +29,17 @@ pub fn parse_pattern(xml: &str, default_case_sensitive: bool) -> Result<ParsedPa
     let mut cur: Option<TokenBuild> = None;
     let mut cur_exc: Option<TokenBuild> = None;
     let mut in_pattern = false;
+    // Active `<and>`/`<or>` group: its kind and the child tokens gathered so far.
+    let mut group: Option<(GroupKind, Vec<TokenBuild>)> = None;
 
-    // Finalize a completed token/exception builder.
+    // Finalize a completed token: into the active group, else the token list.
     macro_rules! finish_token {
         () => {
             if let Some(b) = cur.take() {
-                tokens.push(b.build(&mut unsupported));
+                match group.as_mut() {
+                    Some((_, children)) => children.push(b),
+                    None => tokens.push(b.build(&mut unsupported)),
+                }
             }
         };
     }
@@ -55,19 +60,23 @@ pub fn parse_pattern(xml: &str, default_case_sensitive: bool) -> Result<ParsedPa
                 b"marker" if in_pattern => {
                     mark_from.get_or_insert(tokens.len());
                 }
+                b"and" if in_pattern => group = Some((GroupKind::And, Vec::new())),
+                b"or" if in_pattern => group = Some((GroupKind::Or, Vec::new())),
                 b"token" if in_pattern => {
                     cur = Some(TokenBuild::from_attrs(&e.attributes(), default_case_sensitive))
                 }
                 b"exception" => {
                     cur_exc = Some(TokenBuild::from_attrs(&e.attributes(), default_case_sensitive))
                 }
-                b"and" | b"or" => note(&mut unsupported, "and/or"),
                 _ => {}
             },
             Ok(Event::Empty(e)) => match e.local_name().as_ref() {
                 b"token" if in_pattern => {
                     let b = TokenBuild::from_attrs(&e.attributes(), default_case_sensitive);
-                    tokens.push(b.build(&mut unsupported));
+                    match group.as_mut() {
+                        Some((_, children)) => children.push(b),
+                        None => tokens.push(b.build(&mut unsupported)),
+                    }
                 }
                 b"exception" => {
                     if let Some(tok) = cur.as_mut() {
@@ -75,7 +84,6 @@ pub fn parse_pattern(xml: &str, default_case_sensitive: bool) -> Result<ParsedPa
                         tok.exceptions.push(b);
                     }
                 }
-                b"and" | b"or" => note(&mut unsupported, "and/or"),
                 _ => {}
             },
             Ok(Event::Text(t)) => {
@@ -103,6 +111,11 @@ pub fn parse_pattern(xml: &str, default_case_sensitive: bool) -> Result<ParsedPa
             Ok(Event::End(e)) => match e.local_name().as_ref() {
                 b"exception" => finish_exc!(),
                 b"token" => finish_token!(),
+                b"and" | b"or" => {
+                    if let Some((kind, children)) = group.take() {
+                        tokens.push(TokenBuild::group(kind, children).build(&mut unsupported));
+                    }
+                }
                 b"marker" => mark_to = Some(tokens.len()),
                 b"pattern" => break,
                 _ => {}
@@ -157,13 +170,42 @@ struct TokenBuild {
     max: i32,
     skip: i32,
     has_chunk: bool,
-    /// `scope="previous"|"next"` on an `<exception>` — not yet supported (the
-    /// matcher only checks the current token), so a rule using it is flagged.
-    scope: Option<String>,
+    /// `scope="previous"|"next"|"current"` on an `<exception>`.
+    scope: Scope,
     exceptions: Vec<TokenBuild>,
+    /// When set, this builder is an `<and>`/`<or>` group of child tokens.
+    group: Option<(GroupKind, Vec<TokenBuild>)>,
 }
 
 impl TokenBuild {
+    /// An `<and>`/`<or>` group builder (no attributes; a single position).
+    fn group(kind: GroupKind, children: Vec<TokenBuild>) -> Self {
+        let mut b = TokenBuild::empty();
+        b.group = Some((kind, children));
+        b
+    }
+
+    fn empty() -> Self {
+        TokenBuild {
+            text: String::new(),
+            regexp: false,
+            inflected: false,
+            negate: false,
+            negate_pos: false,
+            case_sensitive: false,
+            postag: None,
+            postag_regexp: false,
+            spacebefore: None,
+            min: 1,
+            max: 1,
+            skip: 0,
+            has_chunk: false,
+            scope: Scope::Current,
+            exceptions: Vec::new(),
+            group: None,
+        }
+    }
+
     fn from_attrs(attrs: &Attributes, default_cs: bool) -> Self {
         let get = |k: &str| attr(attrs, k);
         let max = match get("max").as_deref() {
@@ -185,17 +227,30 @@ impl TokenBuild {
             max,
             skip: get("skip").and_then(|v| v.parse().ok()).unwrap_or(0),
             has_chunk: get("chunk").is_some() || get("chunk_re").is_some(),
-            scope: get("scope"),
+            scope: match get("scope").as_deref() {
+                Some("previous") => Scope::Previous,
+                Some("next") => Scope::Next,
+                _ => Scope::Current,
+            },
             exceptions: Vec::new(),
+            group: None,
         }
     }
 
     fn build(self, unsupported: &mut Vec<String>) -> TokenMatcher {
+        // `<and>`/`<or>` group: build children; the group occupies one position.
+        if let Some((kind, children)) = self.group {
+            return TokenMatcher {
+                group_kind: Some(kind),
+                group: children.into_iter().map(|c| c.build(unsupported)).collect(),
+                min: self.min,
+                max: self.max,
+                skip: self.skip,
+                ..Default::default()
+            };
+        }
         if self.has_chunk {
             note(unsupported, "chunk");
-        }
-        if self.scope.is_some() {
-            note(unsupported, "exception-scope");
         }
         let text = self.text.trim();
         let string = if text.is_empty() {
@@ -224,6 +279,7 @@ impl TokenBuild {
             pos,
             negate_pos: self.negate_pos,
             spacebefore: self.spacebefore,
+            scope: self.scope,
             exceptions: self
                 .exceptions
                 .into_iter()
@@ -232,6 +288,8 @@ impl TokenBuild {
             min: self.min,
             max: self.max,
             skip: self.skip,
+            group_kind: None,
+            group: Vec::new(),
         }
     }
 }

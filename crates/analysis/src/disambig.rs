@@ -323,7 +323,7 @@ fn apply_filterall(
     }
     for j in 0..n {
         let pt = &pat.tokens[pat.mark_from + j];
-        if pt.min != 1 || pt.max != 1 || pt.skip != 0 {
+        if pt.min != 1 || pt.max != 1 || pt.skip != 0 || pt.is_group() {
             return;
         }
     }
@@ -663,13 +663,41 @@ mod tests {
     }
 
     #[test]
-    fn scope_exception_marks_rule_unsupported() {
-        // A rule with an exception scope="previous" must be skipped, not applied.
-        let doc = r#"<rules><rule><pattern><marker>
-            <token postag="UNKNOWN"><exception scope="previous" postag="SENT_START"/></token>
-            </marker><token/></pattern><disambig postag="NNP"/></rule></rules>"#;
-        let rules = parse_disambig_rules(doc).unwrap();
-        assert_eq!(rules.len(), 1);
-        assert!(rules[0].unsupported.contains(&"exception-scope".to_string()));
+    fn scope_previous_exception_blocks_on_neighbour() {
+        // Replace "one" -> CD, but an exception scope="previous">no blocks it
+        // when the previous token is "no" ("no one").
+        let rule = r#"<rule><pattern><marker>
+            <token>one<exception scope="previous">no</exception></token>
+            </marker></pattern>
+            <disambig action="replace"><wd lemma="one" pos="CD"/></disambig></rule>"#;
+        // Previous token is "no" -> blocked.
+        let mut s = sent(&[("no", &[("no", "DT")]), ("one", &[("one", "PRP")])]);
+        run(rule, &mut s);
+        assert_eq!(readings(&s[2]), vec!["one/PRP"]); // unchanged
+        // Different previous token -> applies.
+        let mut s2 = sent(&[("just", &[("just", "RB")]), ("one", &[("one", "PRP")])]);
+        run(rule, &mut s2);
+        assert_eq!(readings(&s2[2]), vec!["one/CD"]);
+    }
+
+    #[test]
+    fn and_group_requires_all_children() {
+        // <and> requires a position with BOTH an 'install' and an 'instal' lemma.
+        let rule = r#"<rule><pattern><and>
+            <token inflected="yes">install</token>
+            <token inflected="yes">instal</token>
+            </and></pattern>
+            <disambig action="remove"><wd lemma="instal"/></disambig></rule>"#;
+        // Token has both lemmas -> group matches, instal removed.
+        let mut s = sent(&[(
+            "installs",
+            &[("install", "VBZ"), ("instal", "VBZ")],
+        )]);
+        run(rule, &mut s);
+        assert_eq!(readings(&s[1]), vec!["install/VBZ"]);
+        // Token with only one lemma -> group does not match, unchanged.
+        let mut s2 = sent(&[("installs", &[("install", "VBZ")])]);
+        run(rule, &mut s2);
+        assert_eq!(readings(&s2[1]), vec!["install/VBZ"]);
     }
 }

@@ -14,7 +14,7 @@ pub use analyzed::{AnalyzedToken, AnalyzedTokenReadings};
 pub use entities::{expand, parse_entity_defs};
 pub use parse::{parse_pattern, ParsedPattern};
 pub use pattern::{Pattern, PatternMatch};
-pub use token::{PosMatcher, StringMatcher, TokenMatcher};
+pub use token::{GroupKind, PosMatcher, Scope, StringMatcher, TokenMatcher};
 
 #[cfg(test)]
 mod integration_tests {

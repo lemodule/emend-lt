@@ -111,9 +111,12 @@ subsystem, deliberately excluded), dumping `surface|lemma/POS#…` per token in 
 sentence and compares readings.
 
 **Result** over a 1,500-sentence corpus (grammar.xml examples): raw byte-identical; post-
-disambiguation **token-reading parity ≈ 85.9%**. Every remaining diff is a *false negative* from a
-deferred matcher feature (chunk-based rules, `<and>`/`<or>`, `<exception scope=>`) or a cascade of
-one — **~zero genuine false positives** (the discipline: under-apply, never mis-apply).
+disambiguation **token-reading parity ≈ 89.6% / sentence parity 32%** (after `<and>`/`<or>` and
+scoped exceptions were added to the matcher — before that, 85.9%). The remaining gap is entirely
+the **chunker**: a rule that reads a `chunk` (skipped), or a *cascade* — a supported rule
+mis-firing because a chunk-based rule upstream didn't run to narrow the readings it sees (e.g.
+`still` keeps its VB/NN readings, so `MD_VB` wrongly makes it `still/VB`). The action semantics
+themselves are correct; each such rule's own `<example>` passes.
 
 **Action semantics that bit us (all confirmed against the oracle / decompiled
 `DisambiguationPatternRuleReplacer`):**
@@ -147,8 +150,9 @@ one — **~zero genuine false positives** (the discipline: under-apply, never mi
   `AnalyzedTokenReadings` (a position with all readings + whitespace context + SENT_START).
 - **Token matcher** (`token.rs`): LT's `PatternToken.isMatched` exactly — string test
   (literal/regexp, `case_sensitive`, `inflected`→lemma, `negate`), POS test
-  (`postag`/`postag_regexp`, `UNKNOWN`, `negate_pos`), `spacebefore`, and `<exception>`s
-  (current scope), combined with the `XOR` negation logic.
+  (`postag`/`postag_regexp`, `UNKNOWN`, `negate_pos`), `spacebefore`, `<exception>`s
+  (`scope="current|previous|next"`, via neighbour-aware `matches_context`), and `<and>`/`<or>`
+  groups (one position that must satisfy all / any children), combined with the `XOR` logic.
 - **Sequence matcher** (`pattern.rs`): greedy backtracking over `min`/`max`/`skip`, with
   `<marker>` bounds tracked through the actual matched token path.
 - **Parser** (`parse.rs`) + **entity expansion** (`entities.rs`): compiles `<pattern>` XML,
@@ -159,19 +163,19 @@ one — **~zero genuine false positives** (the discipline: under-apply, never mi
 
 | File | Patterns | Parse OK | Fully supported by current features |
 |---|---|---|---|
-| `grammar.xml` | 5,543 | 5,542 | 4,697 (**84.7%**) |
-| `disambiguation.xml` | 1,063 | 1,061 | 874 (**82.2%**) |
+| `grammar.xml` | 5,543 | 5,542 | 4,724 (**85.2%**) |
+| `disambiguation.xml` | 1,063 | 1,061 | 975 (**91.7%**) |
 
-Quantified gaps (deliberately deferred, not silently wrong — flagged per pattern via
-`ParsedPattern::unsupported`): **`chunk`/`chunk_re`** (818 grammar / 86 disambiguation — needs
-the OpenNLP phrase chunker, a separate subsystem) and **`<and>`/`<or>` token groups** (49 /
-111). 16 unit tests cover the token + sequence + parser + entity semantics.
+The single remaining gap (deliberately deferred, not silently wrong — flagged per pattern via
+`ParsedPattern::unsupported`) is **`chunk`/`chunk_re`** (818 grammar / 86 disambiguation — needs
+the OpenNLP phrase chunker, a separate subsystem). `<and>`/`<or>` groups and scoped exceptions are
+now supported. 18 unit tests cover the token + sequence + parser + entity semantics.
 
 ## Next (English)
 
-- ~~1.3b Disambiguator~~ ✅ done (`crates/analysis`).
-- **`<and>`/`<or>` groups + `<exception scope=>` + OpenNLP chunker** in the matcher — these three
-  features are the entire disambiguation parity gap (and most of the grammar gap).
+- ~~1.3b Disambiguator~~ ✅ done (`crates/analysis`). ~~`<and>`/`<or>` + scoped exceptions~~ ✅ done.
+- **OpenNLP chunker** in the matcher — the last matcher feature; the entire remaining
+  disambiguation/grammar parity gap (chunk-reading rules + cascades).
 - 1.4 XML pattern-rule engine (`en/grammar.xml`) — reuses the same matcher; the long pole.
 - 1.5 hand-coded English rules (`EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, …).
 - Known raw-tagger edge (not disambiguation): hyphenated plurals like `four-year-olds` get one

@@ -156,10 +156,13 @@ matcher is built once (`crates/matcher`) and shared.
     `max` 532, `negate` 25, `negate_pos` 13; `<marker>` 14447, `<match>` 1896, `<and>` 51.
   - disambiguation.xml actions: `replace` 358, `filter` 80, `remove` 75, `add` 75, `filterall` 25,
     `unify` 2.
-- **Coverage today** (core features, `pattern-coverage` bin): grammar **84.7%** (4697/5543),
-  disambiguation **82.2%** (874/1063) of patterns fully supported. Remaining gaps, flagged
-  per-pattern (never silently wrong): **`chunk`/`chunk_re`** (818 grammar / 86 disambig — needs the
-  OpenNLP phrase chunker, a separate subsystem) and **`<and>`/`<or>` token groups** (49 / 111).
+- **Coverage today** (core features, `pattern-coverage` bin): grammar **85.2%** (4724/5543),
+  disambiguation **91.7%** (975/1063) of patterns fully supported (`<and>`/`<or>` groups + scoped
+  exceptions now supported). The single remaining gap, flagged per-pattern (never silently wrong):
+  **`chunk`/`chunk_re`** (818 grammar / 86 disambig — needs the OpenNLP phrase chunker, a separate
+  subsystem). Disambiguation token-parity vs Java LT is **89.6%**; the whole gap is the chunker
+  (chunk-reading rules + cascades where a supported rule sees readings a chunk rule should have
+  narrowed first).
 
 ---
 

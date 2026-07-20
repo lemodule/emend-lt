@@ -91,12 +91,53 @@ mismatches (`emphasis`, `climbdowns`) in the first parity run and then resolved.
 forms from the dictionary + case variants, contractions, and OOV words): zero diffs on the
 full `lemma/POS` reading multiset per word.
 
-### Disambiguator — needs the shared matcher below first
+### Disambiguator (1.3b) ✅ done — raw byte-exact, disambiguation ≈85.9% token parity
 
-`en/disambiguation.xml` is a **761-rule / 104-rulegroup** engine (actions: 358 `replace`,
-80 `filter`, 75 `remove`, 75 `add`, 25 `filterall`, 2 `unify`). Its token-pattern semantics are
-**identical to the Phase 1.4 `grammar.xml` engine**, so the matcher is built once and shared.
-Ground truth is LT's analyzed sentence (`JLanguageTool.getAnalyzedSentence`).
+`crates/analysis` turns text into the `Vec<AnalyzedTokenReadings>` the matcher runs over and then
+applies `en/disambiguation.xml` as an ordered rewrite system.
+
+- **Raw analysis** (`Analyzer::raw`, LT `getRawAnalyzedSentence`): word-tokenize → POS-tag → drop
+  whitespace (recording `whitespace_before`) → prepend `SENT_START` → append a `SENT_END` reading
+  to the last token. **Byte-identical** to Java LT on the probe set.
+- **Rule engine** (`disambig.rs`): parses `<rule>`/`<rulegroup>` = `<pattern>` (compiled by the
+  shared matcher) + `<antipattern>`s + `<disambig>`. Actions: `replace`, `add`, `remove`, `filter`,
+  `filterall`; `unify`/`ignore_spelling`/`immunize` are reading-no-ops (they don't touch lemma/POS
+  in LT). Applied in document order.
+
+**Oracle**: `oracle/AnalyzedOracle.java` runs `getRawAnalyzedSentence` then **only**
+`XmlRuleDisambiguator` (not the hybrid — the multiword chunker over `multiwords.txt` is a separate
+subsystem, deliberately excluded), dumping `surface|lemma/POS#…` per token in modes `raw`/`dis`.
+`crates/analysis/src/bin/analyze.rs` emits the identical format; a structural comparator aligns by
+sentence and compares readings.
+
+**Result** over a 1,500-sentence corpus (grammar.xml examples): raw byte-identical; post-
+disambiguation **token-reading parity ≈ 85.9%**. Every remaining diff is a *false negative* from a
+deferred matcher feature (chunk-based rules, `<and>`/`<or>`, `<exception scope=>`) or a cascade of
+one — **~zero genuine false positives** (the discipline: under-apply, never mis-apply).
+
+**Action semantics that bit us (all confirmed against the oracle / decompiled
+`DisambiguationPatternRuleReplacer`):**
+
+1. **`&quot;` etc. are separate `GeneralRef` events** in quick-xml — `parse.rs` ignored them, so
+   every `<token>&quot;</token>` silently became an empty (match-anything) token and its
+   `<disambig>` corrupted the first real token of *every* sentence. Now resolved in `parse.rs`.
+2. **Bare `<disambig postag="X"/>` (REPLACE)** touches **only the first marker token** (`fromPos`)
+   and collapses it to a *single* reading `(surface, X, lemma)`, where `lemma` = the **last**
+   existing reading whose POS is exactly `X`, else the token's first-reading lemma (null if
+   untagged). So `best[…good/JJS,well/JJS,…]+IN → best[well/JJS]` (and `of/IN` untouched);
+   `are[are/NN,be/VBP] → be/VBP`; `10[] → 10[_/CD]`.
+3. **`filter`/`remove` take a `postag` OR `<wd>`**: `postag` is a regex over readings (keep, resp.
+   drop, matching ones); `<wd>` matches by lemma+POS (absent attr = wildcard). A `<wd>`-list
+   REPLACE is a *hard* set to the wd readings.
+4. **A `remove`/`filter` that empties a token leaves one null `(_/_)` reading** (LT never lets a
+   token reach zero readings) — that's why LT prints `∅/∅`, not an empty token.
+5. **`filterall`** keeps, per marker token, only the readings its *pattern token* matched.
+6. **`<antipattern>`s** must be honored (761 of them): if one matches over the rule's span, the
+   match is suppressed. A rule whose pattern **or any antipattern** uses an unsupported feature is
+   skipped wholesale — otherwise we'd fire when an unsupported antipattern would have blocked
+   (this was the `have/VB` bug). Antipatterns are where most of the coverage gap concentrates.
+7. **`SENT_END`** reading copies the token's *last existing reading's* lemma (null when untagged,
+   whose lone null reading is then dropped) — not the surface form.
 
 ## Shared token-pattern matcher (serves 1.3b disambiguation + 1.4 grammar)
 
@@ -128,6 +169,10 @@ the OpenNLP phrase chunker, a separate subsystem) and **`<and>`/`<or>` token gro
 
 ## Next (English)
 
-- **1.3b Disambiguator** — the shared token-pattern matcher + `disambiguation.xml`.
+- ~~1.3b Disambiguator~~ ✅ done (`crates/analysis`).
+- **`<and>`/`<or>` groups + `<exception scope=>` + OpenNLP chunker** in the matcher — these three
+  features are the entire disambiguation parity gap (and most of the grammar gap).
 - 1.4 XML pattern-rule engine (`en/grammar.xml`) — reuses the same matcher; the long pole.
 - 1.5 hand-coded English rules (`EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, …).
+- Known raw-tagger edge (not disambiguation): hyphenated plurals like `four-year-olds` get one
+  fewer NNS reading than LT (LT also emits a self-lemma `four-year-olds/NNS`).

@@ -69,7 +69,7 @@ impl PosMatcher {
         }
     }
 
-    fn matches_reading(&self, token: &AnalyzedToken) -> bool {
+    pub fn matches_reading(&self, token: &AnalyzedToken) -> bool {
         match self {
             PosMatcher::Unknown => token.has_no_tag(),
             _ => match &token.pos {
@@ -150,6 +150,12 @@ impl TokenMatcher {
         self.exceptions
             .iter()
             .any(|e| e.is_matched(r, whitespace_before))
+    }
+
+    /// Whether this token keeps reading `r` (matches it and no exception blocks
+    /// it) — the per-reading predicate the `filterall` disambig action needs.
+    pub fn keeps_reading(&self, r: &AnalyzedToken, whitespace_before: bool) -> bool {
+        self.is_matched(r, whitespace_before) && !self.exception_matched(r, whitespace_before)
     }
 
     /// Whole-token match at a position: some reading matches and no

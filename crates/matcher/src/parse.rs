@@ -89,6 +89,17 @@ pub fn parse_pattern(xml: &str, default_case_sensitive: bool) -> Result<ParsedPa
                     b.text.push_str(&txt);
                 }
             }
+            // quick-xml emits `&quot;`, `&#39;`, … inside token text as separate
+            // reference events; resolve them and append to the active token.
+            Ok(Event::GeneralRef(r)) => {
+                if let Some(txt) = resolve_ref(&r) {
+                    if let Some(b) = cur_exc.as_mut() {
+                        b.text.push_str(&txt);
+                    } else if let Some(b) = cur.as_mut() {
+                        b.text.push_str(&txt);
+                    }
+                }
+            }
             Ok(Event::End(e)) => match e.local_name().as_ref() {
                 b"exception" => finish_exc!(),
                 b"token" => finish_token!(),
@@ -108,6 +119,22 @@ pub fn parse_pattern(xml: &str, default_case_sensitive: bool) -> Result<ParsedPa
         pattern.mark_to = t;
     }
     Ok(ParsedPattern { pattern, unsupported })
+}
+
+/// Resolve an XML reference event (content between `&` and `;`): the five
+/// predefined entities and numeric character references.
+fn resolve_ref(r: &quick_xml::events::BytesRef) -> Option<String> {
+    if let Ok(Some(ch)) = r.resolve_char_ref() {
+        return Some(ch.to_string());
+    }
+    match String::from_utf8_lossy(r.as_ref()).as_ref() {
+        "quot" => Some("\"".to_string()),
+        "amp" => Some("&".to_string()),
+        "apos" => Some("'".to_string()),
+        "lt" => Some("<".to_string()),
+        "gt" => Some(">".to_string()),
+        _ => None,
+    }
 }
 
 fn note(list: &mut Vec<String>, name: &str) {
@@ -130,6 +157,9 @@ struct TokenBuild {
     max: i32,
     skip: i32,
     has_chunk: bool,
+    /// `scope="previous"|"next"` on an `<exception>` — not yet supported (the
+    /// matcher only checks the current token), so a rule using it is flagged.
+    scope: Option<String>,
     exceptions: Vec<TokenBuild>,
 }
 
@@ -155,6 +185,7 @@ impl TokenBuild {
             max,
             skip: get("skip").and_then(|v| v.parse().ok()).unwrap_or(0),
             has_chunk: get("chunk").is_some() || get("chunk_re").is_some(),
+            scope: get("scope"),
             exceptions: Vec::new(),
         }
     }
@@ -163,11 +194,22 @@ impl TokenBuild {
         if self.has_chunk {
             note(unsupported, "chunk");
         }
+        if self.scope.is_some() {
+            note(unsupported, "exception-scope");
+        }
         let text = self.text.trim();
         let string = if text.is_empty() {
             None
         } else if self.regexp {
-            StringMatcher::regex(text, self.case_sensitive).ok()
+            match StringMatcher::regex(text, self.case_sensitive) {
+                Ok(m) => Some(m),
+                Err(_) => {
+                    // A regex we cannot compile must not silently become a
+                    // match-anything token; flag the rule so callers skip it.
+                    note(unsupported, "regex");
+                    None
+                }
+            }
         } else {
             Some(StringMatcher::literal(text, self.case_sensitive))
         };

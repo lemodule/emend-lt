@@ -7,8 +7,9 @@
 //! of the N-th pattern token. `<match>` transforms (POS-driven replacements) are
 //! not yet supported — a rule using one is flagged and skipped.
 
+use fancy_regex::Regex;
 use matcher::{parse_pattern, AnalyzedTokenReadings, Pattern};
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, Writer};
 
 /// One rendered grammar finding.
@@ -24,15 +25,40 @@ pub struct GrammarMatch {
     pub category_id: String,
 }
 
-/// A `\N` backreference or literal text fragment.
-#[derive(Debug, Clone)]
+/// A `\N` backreference, literal text fragment, or a `<match>` element.
+#[derive(Clone)]
 enum Seg {
     Text(String),
     Ref(usize), // 1-based pattern-token index
+    Match(MatchSpec),
+}
+
+/// `case_conversion` on a `<match>` element.
+#[derive(Clone, Copy)]
+enum CaseConv {
+    None,
+    StartLower,
+    StartUpper,
+    AllLower,
+    AllUpper,
+    /// Apply the reference token's own case pattern to the produced form.
+    Preserve,
+}
+
+/// A `<match no="N" …>` in a `<suggestion>`/`<message>`, minus POS synthesis:
+/// takes the surface of pattern token `no`, optionally applies a `regexp_match`
+/// → `regexp_replace` substitution, then a `case_conversion`. A `<match>` that
+/// carries `postag`/`postag_replace` needs the Morfologik synthesizer we don't
+/// have yet, so its rule is flagged `match-synth` and skipped instead.
+#[derive(Clone)]
+struct MatchSpec {
+    no: usize,
+    case_conv: CaseConv,
+    regex: Option<(Regex, String)>,
 }
 
 /// One piece of a `<message>`: literal/ref text, or an inline `<suggestion>`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum MsgItem {
     Seg(Seg),
     Suggestion(Vec<Seg>),
@@ -46,6 +72,9 @@ pub struct Example {
     pub text: String,
     pub marker: Option<(usize, usize)>,
     pub correction: Option<Vec<String>>,
+    /// `type="triggers_error"`: LT documents that the rule *does* fire here (a
+    /// known/accepted match), so it is neither a positive nor a plain negative.
+    pub triggers_error: bool,
 }
 
 pub struct GrammarRule {
@@ -103,9 +132,10 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
     let mut sugg: Vec<Seg> = Vec::new();
     let mut suggestions: Vec<Vec<Seg>> = Vec::new();
     let mut sugg_in_message = false;
-    let mut msg_has_match = false;
-    // A `<match>` inside a suggestion makes that replacement unrenderable.
-    let mut sugg_has_match = false;
+    // A `<match postag=…>` needs the (not-yet-built) synthesizer.
+    let mut needs_synth = false;
+    // Inside a `<match>…</match>` (start form) — swallow its lemma-override text.
+    let mut in_match = false;
     // A `<filter class=...>` needs a Java filter class we cannot run.
     let mut has_filter = false;
 
@@ -116,13 +146,16 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
     let mut ex_correction: Option<Vec<String>> = None;
     let mut ex_marker: Option<(usize, usize)> = None;
     let mut ex_marker_start: Option<usize> = None;
+    let mut ex_triggers_error = false;
 
     let is_wrapper = |n: &[u8]| n == b"pattern" || n == b"antipattern";
 
     macro_rules! push_text {
         ($txt:expr) => {{
             let segs = parse_backrefs(&$txt);
-            if in_suggestion {
+            if in_match {
+                // lemma-override text of a synth `<match>` — never rendered.
+            } else if in_suggestion {
                 sugg.extend(segs);
             } else if in_message {
                 message.extend(segs.into_iter().map(MsgItem::Seg));
@@ -175,7 +208,7 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
                     captured_antis.clear();
                     message.clear();
                     suggestions.clear();
-                    msg_has_match = false;
+                    needs_synth = false;
                     has_filter = false;
                 }
                 b"pattern" | b"antipattern" if in_rule || group_id.is_some() => {
@@ -195,16 +228,21 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
                     in_suggestion = true;
                     sugg = Vec::new();
                     sugg_in_message = in_message;
-                    sugg_has_match = false;
                 }
-                b"match" if in_suggestion => sugg_has_match = true,
-                b"match" if in_message => msg_has_match = true,
+                b"match" if in_suggestion || in_message => {
+                    match parse_match_spec(e) {
+                        Ok(spec) => push_match(spec, in_suggestion, &mut sugg, &mut message),
+                        Err(()) => needs_synth = true,
+                    }
+                    in_match = true; // start form: skip any lemma-override text
+                }
                 b"filter" if in_rule => has_filter = true,
                 b"example" if in_rule => {
                     in_example = true;
                     ex_text.clear();
                     ex_marker = None;
                     ex_marker_start = None;
+                    ex_triggers_error = attr(e, "type").as_deref() == Some("triggers_error");
                     ex_correction = attr(e, "correction").map(|c| {
                         // Unescape XML entities (e.g. `&apos;`) before splitting.
                         let c = quick_xml::escape::unescape(&c)
@@ -219,8 +257,10 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
                 _ => {}
             },
             Event::Empty(e) => match e.local_name().as_ref() {
-                b"match" if in_suggestion => sugg_has_match = true,
-                b"match" if in_message => msg_has_match = true,
+                b"match" if in_suggestion || in_message => match parse_match_spec(e) {
+                    Ok(spec) => push_match(spec, in_suggestion, &mut sugg, &mut message),
+                    Err(()) => needs_synth = true,
+                },
                 b"filter" if in_rule => has_filter = true,
                 _ => {}
             },
@@ -267,11 +307,9 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
                         captured_pattern = Some(cap);
                     }
                 }
+                b"match" => in_match = false,
                 b"suggestion" if in_suggestion => {
                     in_suggestion = false;
-                    if sugg_has_match {
-                        msg_has_match = true; // unrenderable replacement -> skip rule
-                    }
                     let block = std::mem::take(&mut sugg);
                     if sugg_in_message {
                         message.push(MsgItem::Suggestion(block.clone()));
@@ -290,6 +328,7 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
                         text: std::mem::take(&mut ex_text),
                         marker: ex_marker.take(),
                         correction: ex_correction.take(),
+                        triggers_error: std::mem::take(&mut ex_triggers_error),
                     });
                 }
                 b"rule" if in_rule => {
@@ -306,7 +345,7 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
                         std::mem::take(&mut message),
                         std::mem::take(&mut suggestions),
                         std::mem::take(&mut examples),
-                        msg_has_match || has_filter,
+                        needs_synth || has_filter,
                     ) {
                         if rule_off {
                             push_unique(&mut rule.unsupported, "disabled");
@@ -339,13 +378,13 @@ fn build_rule(
     message: Vec<MsgItem>,
     suggestions: Vec<Vec<Seg>>,
     examples: Vec<Example>,
-    msg_has_match: bool,
+    needs_synth: bool,
 ) -> Option<GrammarRule> {
     let cap = pattern?;
     let parsed = parse_pattern(&cap.xml, cap.case_sensitive).ok()?;
     let mut unsupported = parsed.unsupported;
-    if msg_has_match {
-        push_unique(&mut unsupported, "message-match");
+    if needs_synth {
+        push_unique(&mut unsupported, "match-synth");
     }
     let mut antipatterns = Vec::new();
     for a in antis.iter().chain(group_antis.iter()) {
@@ -420,6 +459,78 @@ fn attr(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Parse a `<match>` element into a [`MatchSpec`], or `Err(())` if it needs the
+/// synthesizer (`postag`/`postag_replace`) or references nothing (`no` missing).
+fn parse_match_spec(e: &BytesStart) -> Result<MatchSpec, ()> {
+    if attr(e, "postag").is_some() || attr(e, "postag_replace").is_some() {
+        return Err(());
+    }
+    let no: usize = attr(e, "no").and_then(|s| s.parse().ok()).unwrap_or(0);
+    if no == 0 {
+        return Err(()); // `no="0"` is a whole-token ref we can't resolve here
+    }
+    let case_conv = match attr(e, "case_conversion").as_deref() {
+        Some("startlower") => CaseConv::StartLower,
+        Some("startupper") => CaseConv::StartUpper,
+        Some("alllower") => CaseConv::AllLower,
+        Some("allupper") => CaseConv::AllUpper,
+        Some("preserve") => CaseConv::Preserve,
+        _ => CaseConv::None,
+    };
+    let regex = match (attr(e, "regexp_match"), attr(e, "regexp_replace")) {
+        (Some(m), Some(r)) => {
+            let re = Regex::new(&m).map_err(|_| ())?;
+            Some((re, java_to_fancy_replacement(&r)))
+        }
+        _ => None,
+    };
+    Ok(MatchSpec { no, case_conv, regex })
+}
+
+/// Translate a Java `Matcher.replaceAll` template to fancy-regex's expander
+/// syntax. Java reads `$` + maximal digits as a group ref (`$1re` = group 1 then
+/// literal `re`), while fancy-regex would greedily parse `1re` as a group *name*;
+/// wrapping numbered groups as `${N}` disambiguates. `\x` is a Java escape → the
+/// literal `x`; a lone `$` becomes `$$` (fancy's literal-dollar).
+fn java_to_fancy_replacement(r: &str) -> String {
+    let mut out = String::new();
+    let mut chars = r.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            }
+            '$' => {
+                let mut num = String::new();
+                while let Some(d) = chars.peek().copied().filter(|d| d.is_ascii_digit()) {
+                    num.push(d);
+                    chars.next();
+                }
+                if num.is_empty() {
+                    out.push_str("$$"); // literal dollar
+                } else {
+                    out.push_str("${");
+                    out.push_str(&num);
+                    out.push('}');
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Route a parsed match into the active suggestion or message stream.
+fn push_match(spec: MatchSpec, in_suggestion: bool, sugg: &mut Vec<Seg>, message: &mut Vec<MsgItem>) {
+    if in_suggestion {
+        sugg.push(Seg::Match(spec));
+    } else {
+        message.push(MsgItem::Seg(Seg::Match(spec)));
+    }
 }
 
 fn resolve_ref(r: &quick_xml::events::BytesRef) -> Option<String> {
@@ -558,12 +669,26 @@ fn render_match(
     let length = sentence_text[start_byte..end_byte].chars().count();
 
     let resolve = |n: usize| -> String {
-        // \N is 1-based over pattern tokens.
-        m.element_start
-            .get(n.saturating_sub(1))
-            .and_then(|&ti| tokens.get(ti))
-            .map(|t| t.token.clone())
-            .unwrap_or_default()
+        // \N / `<match no=N>` is 1-based over pattern tokens. LT clamps an
+        // out-of-range ref to the last matched token (MatchState.setToken).
+        let last = m.element_start.len().saturating_sub(1);
+        let idx = n.saturating_sub(1).min(last);
+        let (Some(&start), Some(&count)) =
+            (m.element_start.get(idx), m.element_count.get(idx))
+        else {
+            return String::new();
+        };
+        // A `min="0"` element that matched nothing has an empty reference; an
+        // element that matched several tokens joins them with their whitespace.
+        let mut s = String::new();
+        for i in start..start + count {
+            let Some(t) = tokens.get(i) else { break };
+            if i > start && t.whitespace_before {
+                s.push(' ');
+            }
+            s.push_str(&t.token);
+        }
+        s
     };
 
     // LT preserves case: when the marked text starts uppercase, a suggestion
@@ -578,8 +703,11 @@ fn render_match(
         .suggestions
         .iter()
         .map(|segs| {
-            let s = expand(segs, &resolve);
-            if upper_initial {
+            let s = normalize_spaces(&expand(segs, &resolve));
+            // LT capitalizes a suggestion when the error is uppercase-initial,
+            // *unless* the suggestion opens with a `\N` backref and one of its
+            // `<match>`es converts case (PatternRuleMatcher.matchPreservesCase).
+            if upper_initial && !suppresses_capitalize(segs) {
                 capitalize_first(&s)
             } else {
                 s
@@ -613,9 +741,89 @@ fn expand(segs: &[Seg], resolve: &dyn Fn(usize) -> String) -> String {
         match seg {
             Seg::Text(t) => s.push_str(t),
             Seg::Ref(n) => s.push_str(&resolve(*n)),
+            Seg::Match(spec) => s.push_str(&apply_match_spec(spec, resolve)),
         }
     }
     s
+}
+
+/// LT suppresses its outer "capitalize when the error is uppercase-initial" for
+/// a suggestion that opens with a `\N` backreference *and* contains a `<match>`
+/// with an explicit `case_conversion` (`matchPreservesCase` returns false).
+fn suppresses_capitalize(segs: &[Seg]) -> bool {
+    let starts_with_ref = matches!(segs.first(), Some(Seg::Ref(_)));
+    let has_caseconv_match = segs
+        .iter()
+        .any(|s| matches!(s, Seg::Match(m) if !matches!(m.case_conv, CaseConv::None)));
+    starts_with_ref && has_caseconv_match
+}
+
+/// Collapse runs of whitespace to a single space, as LT does when an empty
+/// backreference leaves a double space (`concatWithoutExtraSpace`). Leading and
+/// trailing single spaces are preserved (some suggestions insert one on purpose).
+fn normalize_spaces(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out
+}
+
+/// Render one `<match>`: surface of token `no`, `regexp` substitution, then case.
+fn apply_match_spec(spec: &MatchSpec, resolve: &dyn Fn(usize) -> String) -> String {
+    let source = resolve(spec.no);
+    let mut s = source.clone();
+    if let Some((re, rep)) = &spec.regex {
+        s = re.replace_all(&s, rep.as_str()).into_owned();
+    }
+    match spec.case_conv {
+        CaseConv::None => s,
+        CaseConv::AllLower => s.to_lowercase(),
+        CaseConv::AllUpper => s.to_uppercase(),
+        CaseConv::StartLower => lower_first(&s),
+        CaseConv::StartUpper => upper_first(&s),
+        CaseConv::Preserve => preserve_case(&source, &s),
+    }
+}
+
+/// Force-lowercase the first character.
+fn lower_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Force-uppercase the first character.
+fn upper_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Apply `original`'s case shape to `s` (LT `case_conversion="preserve"`): all
+/// upper if `original` is all-upper, else start-upper if it is capitalized.
+fn preserve_case(original: &str, s: &str) -> String {
+    let letters: Vec<char> = original.chars().filter(|c| c.is_alphabetic()).collect();
+    if !letters.is_empty() && letters.iter().all(|c| c.is_uppercase()) {
+        s.to_uppercase()
+    } else if original.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        upper_first(s)
+    } else {
+        s.to_string()
+    }
 }
 
 fn render_message(items: &[MsgItem], resolve: &dyn Fn(usize) -> String) -> String {
@@ -624,6 +832,7 @@ fn render_message(items: &[MsgItem], resolve: &dyn Fn(usize) -> String) -> Strin
         match it {
             MsgItem::Seg(Seg::Text(t)) => s.push_str(t),
             MsgItem::Seg(Seg::Ref(n)) => s.push_str(&resolve(*n)),
+            MsgItem::Seg(Seg::Match(spec)) => s.push_str(&apply_match_spec(spec, resolve)),
             MsgItem::Suggestion(segs) => {
                 s.push('\u{201C}');
                 s.push_str(&expand(segs, resolve));
@@ -684,10 +893,86 @@ mod tests {
     }
 
     #[test]
-    fn match_in_message_marks_unsupported() {
+    fn postag_match_needs_synth() {
+        // A `<match postag=…>` requires the synthesizer -> flagged, skipped.
         let doc = r#"<rules><rule><pattern><token>x</token></pattern>
-          <message>See <suggestion><match no="1"/></suggestion>.</message></rule></rules>"#;
+          <message>See <suggestion><match no="1" postag="VBZ"/></suggestion>.</message></rule></rules>"#;
         let rules = parse_grammar_rules(doc).unwrap();
-        assert!(rules[0].unsupported.contains(&"message-match".to_string()));
+        assert!(rules[0].unsupported.contains(&"match-synth".to_string()));
+    }
+
+    #[test]
+    fn plain_match_is_supported_and_copies_token() {
+        // `<match no="1"/>` with no transform == `\1`.
+        let doc = r#"<rules><category id="X"><rule id="R"><pattern>
+            <marker><token regexp="yes">teh</token></marker></pattern>
+          <message>Did you mean <suggestion><match no="1"/></suggestion>?</message>
+          </rule></category></rules>"#;
+        let rules = parse_grammar_rules(doc).unwrap();
+        assert!(rules[0].unsupported.is_empty());
+        let text = "teh cat";
+        let toks = sent_from(text, &[("teh", "teh", "NN"), ("cat", "cat", "NN")]);
+        let ms = check_sentence(&rules, &toks, text, 0);
+        assert_eq!(ms[0].replacements, vec!["teh".to_string()]);
+    }
+
+    #[test]
+    fn empty_optional_backref_and_space_collapse() {
+        // `\2` for a min="0" token that matched nothing is empty; the resulting
+        // double space is collapsed (FOR_AWHILE: "in while" -> "in a while").
+        let doc = r#"<rules><category id="X"><rule id="R"><pattern>
+            <marker><token>in</token><token min="0">quite</token><token>while</token></marker>
+            <token>.</token></pattern>
+          <message>Did you mean <suggestion>\1 \2 a \3</suggestion>?</message>
+          </rule></category></rules>"#;
+        let rules = parse_grammar_rules(doc).unwrap();
+        let text = "in while .";
+        let toks = sent_from(text, &[("in", "in", "IN"), ("while", "while", "NN"), (".", ".", "PCT")]);
+        let ms = check_sentence(&rules, &toks, text, 0);
+        assert_eq!(ms[0].replacements, vec!["in a while".to_string()]);
+    }
+
+    #[test]
+    fn out_of_range_no_clamps_to_last() {
+        // `no="2"` on a single-token pattern clamps to the last token (THE_DUTCH).
+        let doc = r#"<rules><category id="X"><rule id="R"><pattern>
+            <marker><token case_sensitive="yes">dutch</token></marker></pattern>
+          <message><suggestion><match no="2" case_conversion="startupper"/></suggestion></message>
+          </rule></category></rules>"#;
+        let rules = parse_grammar_rules(doc).unwrap();
+        let text = "dutch people";
+        let toks = sent_from(text, &[("dutch", "dutch", "JJ"), ("people", "people", "NNS")]);
+        let ms = check_sentence(&rules, &toks, text, 0);
+        assert_eq!(ms[0].replacements, vec!["Dutch".to_string()]);
+    }
+
+    #[test]
+    fn java_replacement_group_adjacent_text() {
+        // `$1re` is Java "group 1 then literal re", not fancy group name "1re".
+        assert_eq!(java_to_fancy_replacement("$1re"), "${1}re");
+        assert_eq!(java_to_fancy_replacement("$1 $3"), "${1} ${3}");
+        assert_eq!(java_to_fancy_replacement(r"\$"), "$");
+    }
+
+    #[test]
+    fn match_case_conversion_and_regex() {
+        // startupper case conversion, and a regexp substitution, on token 1.
+        let doc = r#"<rules><category id="X"><rulegroup id="R">
+          <rule><pattern>
+            <marker><token regexp="yes">iphone</token></marker></pattern>
+          <message><suggestion><match no="1" case_conversion="startupper"/></suggestion></message>
+          </rule>
+          <rule><pattern>
+            <marker><token regexp="yes">colour</token></marker></pattern>
+          <message><suggestion><match no="1" regexp_match="(?i)our$" regexp_replace="or"/></suggestion></message>
+          </rule></rulegroup></category></rules>"#;
+        let rules = parse_grammar_rules(doc).unwrap();
+        let text = "iphone colour";
+        let toks = sent_from(text, &[("iphone", "iphone", "NN"), ("colour", "colour", "NN")]);
+        let ms = check_sentence(&rules, &toks, text, 0);
+        // startupper -> "Iphone"; regex our->or -> "color"
+        let repls: Vec<_> = ms.iter().flat_map(|m| m.replacements.clone()).collect();
+        assert!(repls.contains(&"Iphone".to_string()), "{repls:?}");
+        assert!(repls.contains(&"color".to_string()), "{repls:?}");
     }
 }

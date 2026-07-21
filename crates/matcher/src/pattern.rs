@@ -30,6 +30,9 @@ pub struct PatternMatch {
     /// For each pattern token (element), the sentence-token index where it began
     /// matching — resolves `\N` backreferences (`\1` = `element_start[0]`).
     pub element_start: Vec<usize>,
+    /// For each pattern token, how many sentence tokens it consumed. A `min="0"`
+    /// element that matched nothing has count 0, so its `\N` reference is empty.
+    pub element_count: Vec<usize>,
 }
 
 impl Pattern {
@@ -73,6 +76,7 @@ impl Pattern {
             marker_from_token: mf,
             marker_to_token: mt,
             element_start: rec.iter().map(|(s, _)| *s).collect(),
+            element_count: rec.iter().map(|(_, c)| *c).collect(),
         })
     }
 

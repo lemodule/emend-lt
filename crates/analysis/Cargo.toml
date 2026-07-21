@@ -12,6 +12,7 @@ tagger = { path = "../tagger" }
 matcher = { path = "../matcher" }
 segmenter = { path = "../segmenter" }
 quick-xml = "0.41"
+fancy-regex = "0.18"
 
 [[bin]]
 name = "analyze"

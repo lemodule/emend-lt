@@ -66,6 +66,9 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                // `type="triggers_error"` examples are expected to fire but
+                // carry no correction — they are neither positive nor negative.
+                (None, _) if ex.triggers_error => {}
                 (None, _) => {
                     // Negative: the rule must not fire (anywhere).
                     if matches.is_empty() {

@@ -23,49 +23,70 @@ serving the same `/v2/check` HTTP contract. **English-first.** Oracle for every 
   `chunk` (skipped), or a *cascade* — a supported rule mis-firing because a chunk-based rule
   upstream didn't run to narrow the readings it sees. 11 tests pass.
 - **1.4 Grammar engine** (`crates/analysis` `grammar.rs`) — `grammar.xml` `<rule>`s on the same
-  matcher, emitting `/v2/check` `matches[]`. 3,159 of 5,529 rules supported (rest need `<match>` /
-  Java `<filter>`). **96.0%** of supported rules pass their own `<example>` cases; **95.9%
-  precision** vs the live `/v2/check` on real text (recall 42%, gap = `<match>` suggestions). 13
-  tests pass.
+  matcher, emitting `/v2/check` `matches[]`. **3,789 of 5,529 rules supported** (rest need the
+  synthesizer / Java `<filter>` / chunker). **96.4%** of supported rules pass their own `<example>`
+  cases (98.9% of negative examples). 17 tests pass.
+- **1.4b `<match>` in `<suggestion>`/`<message>`** (`grammar.rs`) — non-synthesizer variants:
+  plain `<match no=N>` (== `\N`), `case_conversion` (all/start · upper/lower · preserve), and
+  `regexp_match`→`regexp_replace`. This is what lifted supported rules 3,159 → 3,789. Semantics
+  pinned against LT bytecode (`javap -c` on `MatchState`/`PatternRuleMatcher`): out-of-range `no`
+  **clamps to the last matched token**; empty `min="0"` backrefs render empty with double-space
+  collapse; Java `$1`-adjacency (`$1re`) translated to fancy-regex `${1}re`; outer
+  capitalize-on-uppercase-error is suppressed iff the suggestion opens with `\N` **and** a match
+  converts case (`matchPreservesCase`). A `<match postag=…>`/`postag_replace` still needs the
+  synthesizer → flagged `match-synth`, skipped.
 
 Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on `main`).
 
-## Do next, in order
+## Done (this phase)
 
-- [x] **1. Disambiguator action layer** on top of `crates/matcher` (completes 1.3). **DONE.**
-  Lives in `crates/analysis` (`Analyzer::raw` + `disambig::{parse_disambig_rules, apply_all}`).
-  Actions implemented: `replace`, `add`, `remove`, `filter`, `filterall` (+ `unify`/
-  `ignore_spelling`/`immunize` as reading-no-ops, which is what LT does to lemma/POS). Oracle:
-  `oracle/AnalyzedOracle.java` (mode `raw`/`dis`, isolates `XmlRuleDisambiguator`), diffed by
-  `crates/analysis/src/bin/analyze.rs`. See phase1-english.md §1.3b for the exact action semantics
-  and gotchas (they bit us repeatedly).
-- [x] **2. `<and>`/`<or>` token groups + `<exception scope="previous|next">`** in the matcher —
-  **DONE** (`crates/matcher` `token.rs`/`parse.rs`). Lifted coverage to 85.2% grammar / 91.7%
-  disambig and disambiguation parity 85.9%→89.6%. `<and>`/`<or>` = one position that must satisfy
-  all/any children; scope exceptions test the prev/next token. The remaining gap is the **chunker**
-  only.
-- [ ] **2b. OpenNLP phrase chunker** (`chunk`/`chunk_re`, 818 grammar / 86 disambig). The last
-  matcher feature — a separate subsystem (OpenNLP maxent models in `libs/opennlp-chunk-models.jar`).
-  Needed both for chunk-reading rules and to stop the *cascade* false positives above (supported
-  rules that see un-narrowed readings). Deferrable per Phase 0 (fired rules skew away from
-  chunk-heavy style rules).
-- [~] **3. Phase 1.4 grammar engine** (`crates/analysis` `grammar.rs`) — **MVP DONE.** Parses
-  `category`/`rulegroup`/`rule` + `<pattern>` + `<antipattern>`s + `<message>`/`<suggestion>`
-  (literal text + `\N` backrefs) + `<example>`; emits `matches[]` (char offset/length, replacements,
-  message, rule id, category id). Honors `default="off"`/`tags="picky"` (skipped at level=default),
-  overlap filtering (drops contained matches), and LT suggestion case-preservation. Flags & skips
-  rules needing `<match>` (in a token, message, or suggestion) or a Java `<filter class=>`.
-  - **Verified**: 96.0% of supported rules pass their own `<example correction=>` cases (LT's own
-    test corpus); vs the live `POST /v2/check` on real text, **precision 95.9%**, recall 42%
-    (`bin/grammar-examples`, `bin/check-text`). Exact offset/length/replacements parity confirmed
-    on MODAL_OF, THEIR_IS, etc.
-  - **Recall gap = `<match>` support** (POS/case transforms in suggestions): CAPITALIZATION,
-    LOWERCASE_NAMES, AI, ID_CASING, the proper-noun/case rules. That's the next lever. Then Java
-    `<filter>` classes (71 rules, e.g. MultitokenSpellerFilter) and `<match>`-in-token backrefs.
-- [ ] **4. Hand-coded English rules** (1.5): `EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, `SPURIOUS_APOSTROPHE`, etc. (see `docs/phase0-scope.md`).
-- [ ] **5. Chunker** (`chunk`/`chunk_re`, 818 grammar patterns) — OpenNLP phrase chunker, a separate subsystem. Deferrable: Phase 0 fired rules skew away from chunk-heavy style rules.
-- [ ] **6. Phase 2** — wrap in an `axum`/`hyper` server exposing `/v2/check` + `/v2/languages`, honoring `disabledRules`/`disabledCategories` and echoing `--allow-origin`.
-- [ ] **7. Phase 3** — differential harness driving `/v2/check` parity % as the headline metric.
+- [x] **1.3b Disambiguator action layer** — see summary above / phase1-english.md §1.3b.
+- [x] **`<and>`/`<or>` groups + `<exception scope="previous|next">`** in the matcher.
+- [x] **1.4 grammar engine MVP** — `\N` backrefs, antipatterns, `default=off`/`picky`, overlap
+  filtering, case-preservation; 95.9% precision vs `/v2/check`.
+- [x] **1.4b `<match>` in suggestions/messages** (non-synthesizer variants) — see summary above.
+  Also fixed the oracle to skip `type="triggers_error"` examples (LT documents these as
+  expected-to-fire, not negatives; 203 of them).
+
+## What's left, in priority order
+
+- [ ] **1. `<match>` element** — *the top grammar recall lever*. Sub-item (a) is **done** (see
+  1.4b); what remains:
+  - [x] **in `<suggestion>`/`<message>`, non-synthesizer** — plain / `case_conversion` /
+    `regexp_match`+`regexp_replace`. Landed (1.4b).
+  - [ ] **the synthesizer** — `<match postag=… postag_replace=…>` (currently flagged `match-synth`,
+    ~566 uses: `postag=` 601, `postag_replace=` 39). Needs a Morfologik **synthesizer** reading
+    `english_synth.dict` (lemma+POS → surface form; inverse of the tagger dict). Rendering hook is
+    ready — `apply_match_spec` just needs a `postag`/`postag_replace` branch. Unlocks the verb-form
+    rules (`VB`/`VBZ`/`VBN`/… families) and the rest of `CAPITALIZATION`.
+  - [ ] **in `<token>`** — token-level backreference (`<token><match no='0'/></token>`): the
+    position must equal an earlier matched token. Still flagged `token-match`, skipped
+    (`crates/matcher/parse.rs`).
+  - [ ] **in `disambiguation.xml`** — the same `<match>` (2 disambig rules deferred).
+  - Oracle: `bin/grammar-examples` (self `<example>` corpus) + `bin/check-text` vs the live server.
+- [ ] **2. Java `<filter>` classes** (71 grammar rules) — post-match filters currently flagged and
+  skipped. Port the high-value ones (`MultitokenSpellerFilter`, then the handful of others). Needs
+  the spelling dict (`en_US.dict`, already read by `crates/morfologik`).
+- [ ] **3. OpenNLP phrase chunker** (`chunk`/`chunk_re`, 818 grammar / 86 disambig) — the **last
+  matcher feature** and the entire remaining *disambiguation* parity gap (89.6% → higher; also
+  removes the cascade false-positives). Separate ML subsystem: OpenNLP maxent models in
+  `libs/opennlp-chunk-models.jar` (GIS/maxent format + feature extraction). Biggest single effort;
+  deferrable per Phase 0.
+- [ ] **4. Hand-coded English rules** (1.5): the Java rules not expressible in XML —
+  `EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, `SPURIOUS_APOSTROPHE`, etc. (`docs/phase0-scope.md`).
+- [ ] **5. Spelling** (`MORFOLOGIK_RULE_EN_US`) — the `en_US.dict` reader exists (`crates/morfologik`,
+  byte-exact); wire it into a spell rule emitting `matches[]` (needed for real `/v2/check` parity —
+  it's a large share of live matches). Suggestions = Morfologik speller edit-distance.
+- [ ] **6. Phase 2 — HTTP server** — wrap the pipeline in `axum`/`hyper` exposing `POST /v2/check`
+  + `GET /v2/languages`, honoring `level`, `disabledRules`/`disabledCategories`, echoing
+  `--allow-origin`. This is what the app actually calls (see contract below).
+- [ ] **7. Phase 3 — differential harness** — drive `/v2/check` parity % (precision/recall over a
+  corpus) as the headline metric; already prototyped ad-hoc in `bin/check-text` vs the server.
+
+**Recommended next:** the **synthesizer** (#1b) — the case/no-transform `<match>` variants have
+landed (1.4b, +630 rules), so the remaining `<match>` recall is gated on `postag`/`postag_replace`,
+which needs a Morfologik synthesizer over `english_synth.dict`. `apply_match_spec` already has the
+rendering seam; it reuses the same oracle harness.
 
 ## Key findings to remember (things that bit us / corrections to the roadmap)
 
@@ -75,6 +96,31 @@ Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on 
 4. `URL_CHARS` in LT is a **range `$`–`_`** (covers `:` `=` `?` …) — do not escape the hyphen. (Bug the oracle caught.)
 5. Rule files use **`<!ENTITY>` regex-macros** (`&uncommon_verbs;` ×169) that quick-xml won't expand — must pre-expand the whole file (`crates/matcher/entities.rs`).
 6. Disambiguation + grammar share the **same token-pattern matcher** — build once (done), drive both.
+7. quick-xml emits `&quot;`/`&#39;` as separate **`GeneralRef` events**; if unhandled, a
+   `<token>&quot;</token>` silently becomes a match-anything token (corrupted whole sentences /
+   fired a rule 360× on random text). Same trap for **`<token><match/></token>`** and **failed
+   regex compiles** — all three now flagged unsupported instead of matching everything.
+8. Grammar `matches[]` gotchas (all reproduced): a bare `<disambig postag>` touches only the first
+   marker token; a `<suggestion>` can be a **direct child of `<rule>`** (not only inside
+   `<message>`); LT **capitalizes suggestions** when the match is uppercase-initial; LT **drops a
+   match contained in another** match's span; `default="off"` / `tags="picky"` rules are off at
+   `level=default`.
+9. **Never silently mis-apply.** Every unsupported feature (chunk, `<match postag>`, `<filter>`,
+   scope before it landed) is flagged per-rule and skipped, so gaps are false *negatives*, not wrong
+   output. Coverage numbers went *down* when we started flagging honestly — that's correct.
+10. **`<match>` semantics are only in bytecode** (LT ships no `.java`; `javap -c` on
+    `MatchState`/`PatternRuleMatcher` is the authority). Four that bit us: (a) an out-of-range `no`
+    **clamps to the last matched token** — `THE_DUTCH` uses `no="2"` on a 1-token pattern; (b) a
+    `min="0"` element that matched nothing renders an **empty** backref, and the resulting double
+    space is collapsed (not trimmed — a leading/trailing single space can be intentional, e.g.
+    `LC_AFTER_PERIOD`); (c) Java replacement `$1re` = group 1 + literal `re`, but fancy-regex reads
+    `1re` as a *group name* → translate numbered groups to `${1}`; (d) the outer
+    capitalize-on-uppercase-error is suppressed **only** when the suggestion opens with a `\N`
+    backref *and* some match `convertsCase()` (`matchPreservesCase`) — a plain `<match no=N>` still
+    capitalizes (`WERE_MD`).
+11. **`type="triggers_error"` `<example>`s are expected to fire**, not negatives (203 in
+    `grammar.xml`); the `grammar-examples` oracle now skips them. Before, they inflated the negative
+    pass rate for *skipped* rules and deflated it once those rules became supported.
 
 ## Environment / reproduction
 
@@ -88,10 +134,17 @@ Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on 
   ```
 - **Running LT HTTP server** (for `/v2/check` oracle):
   `"$JRE/java" -cp "$CP" org.languagetool.server.HTTPServer --port 8099 --allow-origin "*"`.
-- Java oracle sources + extracted dicts currently live in the session scratchpad; **regenerate
-  them** in the new session (extract `english.dict`/`.info` from `libs/english-pos-dict.jar`,
-  copy `en/added.txt` + `en/removed.txt` beside it). Existing oracle Java files to recreate:
-  `TagOracle.java`, `SentOracle.java` (patterns shown in `docs/phase1-english.md`).
+  Note: JDK 17 lives at `/usr/bin/javac`/`javap` (the bundled JRE has no compiler); `javap -c` on
+  `libs/languagetool-core.jar` is the authority when action semantics are unclear (LT ships no
+  `.java`).
+- **Oracle tooling in-repo**: `oracle/AnalyzedOracle.java` (disambiguation, modes `raw`/`dis`,
+  isolates `XmlRuleDisambiguator`; see `oracle/README.md`). Rust-side harness bins in
+  `crates/analysis`: `analyze` (raw/disambig dump), `grammar-examples` (self `<example>` oracle),
+  `check-text` (full pipeline → `matches[]`, diff against `/v2/check`).
+- **Extracted dicts** live in the session scratchpad; **regenerate** in a new session: extract
+  `english.dict`/`.info` from `libs/english-pos-dict.jar`, copy `en/added.txt` + `en/removed.txt`
+  beside it, and `segment.srx` from `libs/languagetool-core.jar`. (`TagOracle.java`/`SentOracle.java`
+  patterns are in `docs/phase1-english.md` if the earlier oracles need recreating.)
 
 ## App integration contract (Phase 4 target, unchanged)
 

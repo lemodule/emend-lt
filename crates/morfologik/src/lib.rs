@@ -5,8 +5,10 @@
 
 pub mod dict;
 pub mod fsa;
+pub mod speller;
 pub mod synth;
 
 pub use dict::{Dictionary, DictEntry, Encoder};
 pub use fsa::{Cfsa2, FsaError};
+pub use speller::Speller;
 pub use synth::Synthesizer;

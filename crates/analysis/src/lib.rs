@@ -15,9 +15,11 @@ use tokenizer::EnglishWordTokenizer;
 
 pub mod disambig;
 pub mod grammar;
+pub mod spelling;
 
 pub use disambig::{parse_disambig_rules, DisambigRule};
 pub use grammar::{check_sentence, parse_grammar_rules, GrammarMatch, GrammarRule};
+pub use spelling::SpellRule;
 
 /// Owns the tagger and tokenizer, producing analyzed sentences.
 pub struct Analyzer<'a> {

@@ -131,6 +131,28 @@ impl Dictionary {
         self.fsa.get_arc(node, self.separator) != 0 || last_final
     }
 
+    /// Word frequency for a spelling dictionary (`frequency-included`): the byte
+    /// stored after the separator, mapped as LT `Speller.getFrequency`
+    /// (`freqChar - 'A'`). Returns 0 when absent or not a frequency dictionary.
+    pub fn frequency(&self, word: &str) -> i32 {
+        if !self.frequency_included {
+            return 0;
+        }
+        let Some((node, _)) = self.walk_path(word.as_bytes()) else {
+            return 0;
+        };
+        let sep_arc = self.fsa.get_arc(node, self.separator);
+        if sep_arc == 0 || self.fsa.is_arc_terminal(sep_arc) {
+            return 0;
+        }
+        let tail = self.fsa.get_end_node(sep_arc);
+        let arc = self.fsa.get_first_arc(tail);
+        if arc == 0 {
+            return 0;
+        }
+        self.fsa.get_arc_label(arc) as i32 - 65
+    }
+
     /// POS lookup: decode every `(stem, tag)` entry stored for `word`.
     ///
     /// Stemming entries are stored as `inflected SEP encodedStem SEP tag`. We

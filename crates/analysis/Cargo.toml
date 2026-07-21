@@ -25,3 +25,7 @@ path = "src/bin/grammar_examples.rs"
 [[bin]]
 name = "check-text"
 path = "src/bin/check_text.rs"
+
+[[bin]]
+name = "spell-text"
+path = "src/bin/spell_text.rs"

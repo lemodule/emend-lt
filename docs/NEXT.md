@@ -46,6 +46,19 @@ serving the same `/v2/check` HTTP contract. **English-first.** Oracle for every 
   filtering is a **full-string** match (LT `Matcher.matches()` is anchored — a partial search
   mis-synthesized `NNS` back from `NN(:UN?)?`). Still flagged `match-synth`: the `+DT`/`+INDT`
   "insert an article" and `_spell_number_` modes.
+- **1.5 Spelling — `MORFOLOGIK_RULE_EN_US` detection** (`crates/morfologik` `speller.rs` +
+  `crates/analysis` `spelling.rs`). `Speller::is_misspelled` is the **byte-exact** port of
+  `morfologik.speller.Speller.isMisspelled` for `en_US` (frequency-included, case-converting): not in
+  `en_US.dict`, and — unless mixed-case — its lowercase is unknown too; digit-bearing words ignored.
+  Validated **0 diffs / 420 words** vs the live server. The rule layer (LT `SpellingCheckRule`) adds
+  token acceptance: skip punctuation/number/URL/e-mail/`@`·`#`·`$` tokens; the `ignore.txt` /
+  `spelling*.txt` accept-lists; `prohibit.txt` always-flag; **hyphen-compound** acceptance (every
+  `-`-part a known word); and `multiwords.txt` (each capitalized term-word spelling-ignored — this is
+  where proper nouns like `Django` come from). Detection parity vs the live `/v2/check`: **46/47
+  exact spans (97.9%)** over a mixed corpus, **zero** false positives on clean prose, the one miss
+  being LT's run-on multi-word *suggestion* span (`novell about`). Suggestions are a best-effort
+  edit-distance-1→2 dictionary search ranked by stored frequency — **not** the full Morfologik
+  speller (bounded FSA-Levenshtein + replacement pairs), so their ordering/coverage is approximate.
 
 Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on `main`).
 
@@ -60,6 +73,8 @@ Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on 
   expected-to-fire, not negatives; 203 of them).
 - [x] **1.4c Morfologik synthesizer** — `<match postag=…>` (concrete / regexp / `postag_replace` /
   static-lemma), cross-product suggestion expansion. +127 rules (3,789 → 3,916). See summary above.
+- [x] **1.5 Spelling detection** (`MORFOLOGIK_RULE_EN_US`) — byte-exact `is_misspelled` (0/420 vs
+  server) + rule layer; 46/47 exact spans, 0 FP. Suggestions best-effort ED1→2. See summary above.
 
 ## What's left, in priority order
 
@@ -86,21 +101,26 @@ Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on 
   deferrable per Phase 0.
 - [ ] **4. Hand-coded English rules** (1.5): the Java rules not expressible in XML —
   `EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, `SPURIOUS_APOSTROPHE`, etc. (`docs/phase0-scope.md`).
-- [ ] **5. Spelling** (`MORFOLOGIK_RULE_EN_US`) — the `en_US.dict` reader exists (`crates/morfologik`,
-  byte-exact); wire it into a spell rule emitting `matches[]` (needed for real `/v2/check` parity —
-  it's a large share of live matches). Suggestions = Morfologik speller edit-distance.
+- [x] **5. Spelling detection** (`MORFOLOGIK_RULE_EN_US`) — landed (1.5): byte-exact `is_misspelled`
+  + rule layer, 46/47 exact spans / 0 FP vs live. **Remaining spelling work** (optional polish):
+  - [ ] **Morfologik speller suggestions** — port the real `morfologik.speller.Speller` (bounded
+    FSA-Levenshtein ED2 + `replacement-pairs` + frequency weighting; 22 KB of bytecode) to make
+    `replacements[]` byte-exact. Current suggestions are approximate ED1→2. Also gives LT's
+    **run-on multi-word** suggestion span (`novell about`), the one detection-span diff.
+  - [ ] **`MultitokenSpellerFilter`** (#2) now unblocked — it reuses this speller.
 - [ ] **6. Phase 2 — HTTP server** — wrap the pipeline in `axum`/`hyper` exposing `POST /v2/check`
   + `GET /v2/languages`, honoring `level`, `disabledRules`/`disabledCategories`, echoing
   `--allow-origin`. This is what the app actually calls (see contract below).
 - [ ] **7. Phase 3 — differential harness** — drive `/v2/check` parity % (precision/recall over a
   corpus) as the headline metric; already prototyped ad-hoc in `bin/check-text` vs the server.
 
-**Recommended next:** **Spelling** (#5, `MORFOLOGIK_RULE_EN_US`) — the biggest *live* `/v2/check`
-recall gap now that the `<match>` synthesizer has landed. The `en_US.dict` reader is already
-byte-exact (`crates/morfologik`); wire it into a spell rule emitting `matches[]` with
-Morfologik-speller edit-distance suggestions. After that, the **HTTP server** (#6) makes the whole
-pipeline exercisable against the app and the live-server differential harness. (The small remaining
-`<match>` tails — `+DT` article insertion, `<token>`-level `<match>` — are low-volume and can wait.)
+**Recommended next:** the **HTTP server** (#6) — grammar, disambiguation, the synthesizer, and
+spelling detection are all in place and validated, so the highest-leverage step is wrapping the
+pipeline in `axum`/`hyper` exposing `POST /v2/check` + `GET /v2/languages`. That makes the whole
+engine exercisable by the app **and** turns the differential harness (#7) into a continuous parity
+metric over real corpora (rather than the current per-rule / ad-hoc bins). Byte-exact **spelling
+suggestions** (the real Morfologik speller) and the small `<match>` tails (`+DT`, `<token>`-level)
+are lower-leverage polish that can follow.
 
 ## Key findings to remember (things that bit us / corrections to the roadmap)
 
@@ -148,6 +168,16 @@ pipeline exercisable against the app and the live-server differential harness. (
     using the token's own POS tag (filtered by `postag`); (f) a suggestion with a multi-form `<match>`
     expands to the **cross-product** of alternatives. The `+DT`/`+INDT` "insert an article" mode is
     *not* morphological synthesis and stays flagged.
+13. **Spelling membership is a two-line rule** once you have the FSA: `en_US.dict` is
+    frequency-included + case-converting, so `is_misspelled(w)` = `!contains(w) && (isMixedCase(w) ||
+    !contains(w.to_lowercase()))`, guarded by "no digit". `contains` must accept the **frequency
+    tail** (a separator arc after the word), which `Dictionary::contains` already does. Things the
+    *rule layer* adds beyond membership (all needed for FP parity): skip any `@`-containing token
+    (LT's e-mail test is loose — `cats@dogs` too) and `#`/`$` prefixes; accept a **hyphen compound**
+    when every `-`-part is known; and — the non-obvious one — **`multiwords.txt` spelling-ignores each
+    capitalized term-word**, which is the *only* reason proper nouns like `Django` (from "Django
+    Unchained") aren't flagged. Suggestions are a *separate* 22 KB algorithm — do **not** conflate
+    detection parity (byte-exact, achievable) with suggestion parity (approximate without the port).
 
 ## Environment / reproduction
 
@@ -167,14 +197,19 @@ pipeline exercisable against the app and the live-server differential harness. (
 - **Oracle tooling in-repo**: `oracle/AnalyzedOracle.java` (disambiguation, modes `raw`/`dis`,
   isolates `XmlRuleDisambiguator`; see `oracle/README.md`). Rust-side harness bins in
   `crates/analysis`: `analyze` (raw/disambig dump), `grammar-examples` (self `<example>` oracle),
-  `check-text` (full pipeline → `matches[]`, diff against `/v2/check`).
+  `check-text` (full pipeline → `matches[]`, diff against `/v2/check`), `spell-text` (spelling only →
+  `offset length suggestions`, diff against `/v2/check` `MORFOLOGIK_RULE_EN_US`); `crates/morfologik`
+  `spell-check` (per-word `is_misspelled`, for membership diffing).
 - **Extracted dicts** live in the session scratchpad; **regenerate** in a new session: extract
   `english.dict`/`.info` from `libs/english-pos-dict.jar`, copy `en/added.txt` + `en/removed.txt`
   beside it, and `segment.srx` from `libs/languagetool-core.jar`. For the **synthesizer** also
   extract `english_synth.dict`/`.info` + `english_tags.txt` from `libs/english-pos-dict.jar` and pass
-  them as the 4th/5th args to `grammar-examples` (and 6th/7th to `check-text`).
-  (`TagOracle.java`/`SentOracle.java` patterns are in `docs/phase1-english.md` if the earlier oracles
-  need recreating.)
+  them as the 4th/5th args to `grammar-examples` (and 6th/7th to `check-text`). For **spelling**
+  extract `en/hunspell/en_US.dict`/`.info` from `libs/english-pos-dict.jar` and copy the loose lists
+  `en/hunspell/{ignore,spelling,spelling_en-US,prohibit}.txt` + `en/multiwords.txt`; `spell-text`
+  takes `<english.dict> <disambiguation.xml> <segment.srx> <en_US.dict> <ignore/spelling…>
+  <multiwords.txt> <prohibit.txt>`. (`TagOracle.java`/`SentOracle.java` patterns are in
+  `docs/phase1-english.md` if the earlier oracles need recreating.)
 
 ## App integration contract (Phase 4 target, unchanged)
 

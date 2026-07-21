@@ -12,3 +12,7 @@ path = "src/bin/fsa_dump.rs"
 [[bin]]
 name = "dict-lookup"
 path = "src/bin/dict_lookup.rs"
+
+[[bin]]
+name = "spell-check"
+path = "src/bin/spell_check.rs"

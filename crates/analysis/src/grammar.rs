@@ -8,7 +8,8 @@
 //! not yet supported — a rule using one is flagged and skipped.
 
 use fancy_regex::Regex;
-use matcher::{parse_pattern, AnalyzedTokenReadings, Pattern};
+use matcher::{parse_pattern, AnalyzedTokenReadings, Pattern, PatternMatch};
+use morfologik::Synthesizer;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, Writer};
 
@@ -45,16 +46,45 @@ enum CaseConv {
     Preserve,
 }
 
-/// A `<match no="N" …>` in a `<suggestion>`/`<message>`, minus POS synthesis:
-/// takes the surface of pattern token `no`, optionally applies a `regexp_match`
-/// → `regexp_replace` substitution, then a `case_conversion`. A `<match>` that
-/// carries `postag`/`postag_replace` needs the Morfologik synthesizer we don't
-/// have yet, so its rule is flagged `match-synth` and skipped instead.
+/// A `<match no="N" …>` in a `<suggestion>`/`<message>`: takes the surface of
+/// pattern token `no`, optionally applies a `regexp_match` → `regexp_replace`
+/// substitution, or POS synthesis (`postag`/`postag_replace`), then a
+/// `case_conversion`. A `<match>` carrying an unsupported synthesis variant
+/// (`+`-prefixed "add article" / `_spell_number_`) still flags its rule
+/// `match-synth` and is skipped.
 #[derive(Clone)]
 struct MatchSpec {
     no: usize,
     case_conv: CaseConv,
     regex: Option<(Regex, String)>,
+    synth: Option<SynthSpec>,
+}
+
+/// POS synthesis for a `<match>`: reference token `no`'s lemma is re-inflected to
+/// a target POS tag via the Morfologik synthesizer (LT `MatchState.toFinalString`
+/// + `BaseSynthesizer.synthesize`). The target tag is either `postag` verbatim
+/// (concrete) or, when `postag_regexp`, `postag` used as a regex over the tag
+/// universe — with `postag_replace` first rewriting the token's own POS tag.
+#[derive(Clone)]
+struct SynthSpec {
+    /// The raw `postag` string: the concrete target tag, or the regex source used
+    /// for reading-POS filtering / `_replace` when `postag_regexp`.
+    postag: String,
+    /// `postag` compiled unanchored — the substitution pattern for `postag_replace`
+    /// (`Matcher.replaceAll`, LT `getTargetPosTag`).
+    postag_re: Regex,
+    /// `postag` compiled as a full-string match (`^(?:…)$`) — LT filters readings
+    /// and the tag universe with `Matcher.matches()`, which is anchored.
+    postag_anchored: Regex,
+    postag_regexp: bool,
+    /// Whether a `postag_replace` attribute was actually present.
+    has_replace: bool,
+    /// `postag_replace` template (fancy-regex form). Defaults to the raw `postag`
+    /// string when the attribute is absent (LT applies `replaceAll(postag)`).
+    postag_replace: String,
+    /// `<match …>lemma</match>` body text: LT `isStaticLemma` — synthesize *this*
+    /// lemma inflected as the matched token is (its POS tag, filtered by `postag`).
+    static_lemma: Option<String>,
 }
 
 /// One piece of a `<message>`: literal/ref text, or an inline `<suggestion>`.
@@ -132,10 +162,13 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
     let mut sugg: Vec<Seg> = Vec::new();
     let mut suggestions: Vec<Vec<Seg>> = Vec::new();
     let mut sugg_in_message = false;
-    // A `<match postag=…>` needs the (not-yet-built) synthesizer.
+    // A `<match>` variant we cannot render (unsupported synthesis mode).
     let mut needs_synth = false;
-    // Inside a `<match>…</match>` (start form) — swallow its lemma-override text.
+    // Inside a `<match>…</match>` (start form): its body text is the static
+    // lemma. The spec is buffered until `</match>` so the body can attach.
     let mut in_match = false;
+    let mut pending_match: Option<MatchSpec> = None;
+    let mut match_body = String::new();
     // A `<filter class=...>` needs a Java filter class we cannot run.
     let mut has_filter = false;
 
@@ -154,7 +187,8 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
         ($txt:expr) => {{
             let segs = parse_backrefs(&$txt);
             if in_match {
-                // lemma-override text of a synth `<match>` — never rendered.
+                // Body of a start-form `<match>` — the static lemma.
+                match_body.push_str(&$txt);
             } else if in_suggestion {
                 sugg.extend(segs);
             } else if in_message {
@@ -230,11 +264,16 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
                     sugg_in_message = in_message;
                 }
                 b"match" if in_suggestion || in_message => {
+                    // Buffered until `</match>` so its body (static lemma) attaches.
                     match parse_match_spec(e) {
-                        Ok(spec) => push_match(spec, in_suggestion, &mut sugg, &mut message),
-                        Err(()) => needs_synth = true,
+                        Ok(spec) => pending_match = Some(spec),
+                        Err(()) => {
+                            needs_synth = true;
+                            pending_match = None;
+                        }
                     }
-                    in_match = true; // start form: skip any lemma-override text
+                    match_body.clear();
+                    in_match = true;
                 }
                 b"filter" if in_rule => has_filter = true,
                 b"example" if in_rule => {
@@ -307,7 +346,18 @@ pub fn parse_grammar_rules(xml: &str) -> Result<Vec<GrammarRule>, String> {
                         captured_pattern = Some(cap);
                     }
                 }
-                b"match" => in_match = false,
+                b"match" => {
+                    in_match = false;
+                    if let Some(mut spec) = pending_match.take() {
+                        let body = match_body.trim();
+                        if !body.is_empty() {
+                            if let Some(s) = spec.synth.as_mut() {
+                                s.static_lemma = Some(body.to_string());
+                            }
+                        }
+                        push_match(spec, in_suggestion, &mut sugg, &mut message);
+                    }
+                }
                 b"suggestion" if in_suggestion => {
                     in_suggestion = false;
                     let block = std::mem::take(&mut sugg);
@@ -461,12 +511,10 @@ fn attr(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
     None
 }
 
-/// Parse a `<match>` element into a [`MatchSpec`], or `Err(())` if it needs the
-/// synthesizer (`postag`/`postag_replace`) or references nothing (`no` missing).
+/// Parse a `<match>` element into a [`MatchSpec`], or `Err(())` if it references
+/// nothing (`no="0"`/missing) or uses an unsupported synthesis variant
+/// (`+`-prefixed "add article" / `_spell_number_`).
 fn parse_match_spec(e: &BytesStart) -> Result<MatchSpec, ()> {
-    if attr(e, "postag").is_some() || attr(e, "postag_replace").is_some() {
-        return Err(());
-    }
     let no: usize = attr(e, "no").and_then(|s| s.parse().ok()).unwrap_or(0);
     if no == 0 {
         return Err(()); // `no="0"` is a whole-token ref we can't resolve here
@@ -486,7 +534,40 @@ fn parse_match_spec(e: &BytesStart) -> Result<MatchSpec, ()> {
         }
         _ => None,
     };
-    Ok(MatchSpec { no, case_conv, regex })
+    let synth = match attr(e, "postag") {
+        Some(postag) => {
+            // `+DT`/`+INDT` ("insert an article") and `_spell_number_` are
+            // special LT synthesis modes we do not implement yet.
+            if postag.starts_with('+') || postag.starts_with('_') {
+                return Err(());
+            }
+            let postag_regexp = attr(e, "postag_regexp").as_deref() == Some("yes");
+            let postag_re = Regex::new(&postag).map_err(|_| ())?;
+            let postag_anchored = anchored_regex(&postag).ok_or(())?;
+            let replace_attr = attr(e, "postag_replace");
+            let has_replace = replace_attr.is_some();
+            // LT defaults `posTagReplace` to the `postag` string when the
+            // attribute is absent, so `replaceAll(postag)` yields the tag itself.
+            let postag_replace =
+                java_to_fancy_replacement(replace_attr.as_deref().unwrap_or(&postag));
+            Some(SynthSpec {
+                postag,
+                postag_re,
+                postag_anchored,
+                postag_regexp,
+                has_replace,
+                postag_replace,
+                static_lemma: None,
+            })
+        }
+        None => None,
+    };
+    Ok(MatchSpec {
+        no,
+        case_conv,
+        regex,
+        synth,
+    })
 }
 
 /// Translate a Java `Matcher.replaceAll` template to fancy-regex's expander
@@ -559,13 +640,14 @@ pub fn check_sentence(
     tokens: &[AnalyzedTokenReadings],
     sentence_text: &str,
     sentence_char_offset: usize,
+    synth: Option<&Synthesizer>,
 ) -> Vec<GrammarMatch> {
     let mut out = Vec::new();
     for rule in rules {
         if !rule.unsupported.is_empty() {
             continue;
         }
-        collect_rule_matches(rule, tokens, sentence_text, sentence_char_offset, &mut out);
+        collect_rule_matches(rule, tokens, sentence_text, sentence_char_offset, synth, &mut out);
     }
     filter_overlaps(out)
 }
@@ -599,10 +681,11 @@ pub fn check_one(
     tokens: &[AnalyzedTokenReadings],
     sentence_text: &str,
     base: usize,
+    synth: Option<&Synthesizer>,
 ) -> Vec<GrammarMatch> {
     let mut out = Vec::new();
     if rule.unsupported.is_empty() {
-        collect_rule_matches(rule, tokens, sentence_text, base, &mut out);
+        collect_rule_matches(rule, tokens, sentence_text, base, synth, &mut out);
     }
     out
 }
@@ -612,6 +695,7 @@ fn collect_rule_matches(
     tokens: &[AnalyzedTokenReadings],
     sentence_text: &str,
     base: usize,
+    synth: Option<&Synthesizer>,
     out: &mut Vec<GrammarMatch>,
 ) {
     let blocked = antipattern_coverage(&rule.antipatterns, tokens);
@@ -623,7 +707,7 @@ fn collect_rule_matches(
         let overlaps =
             (m.from_token..m.to_token).any(|i| blocked.get(i).copied().unwrap_or(false));
         if !overlaps {
-            if let Some(gm) = render_match(rule, tokens, &m, sentence_text, base) {
+            if let Some(gm) = render_match(rule, tokens, &m, sentence_text, base, synth) {
                 out.push(gm);
             }
         }
@@ -653,9 +737,10 @@ fn antipattern_coverage(antis: &[Pattern], tokens: &[AnalyzedTokenReadings]) -> 
 fn render_match(
     rule: &GrammarRule,
     tokens: &[AnalyzedTokenReadings],
-    m: &matcher::PatternMatch,
+    m: &PatternMatch,
     sentence_text: &str,
     base: usize,
+    synth: Option<&Synthesizer>,
 ) -> Option<GrammarMatch> {
     // Marker byte span -> char offset/length within the sentence.
     let from_tok = &tokens[m.marker_from_token];
@@ -668,28 +753,7 @@ fn render_match(
     let offset = base + sentence_text[..start_byte].chars().count();
     let length = sentence_text[start_byte..end_byte].chars().count();
 
-    let resolve = |n: usize| -> String {
-        // \N / `<match no=N>` is 1-based over pattern tokens. LT clamps an
-        // out-of-range ref to the last matched token (MatchState.setToken).
-        let last = m.element_start.len().saturating_sub(1);
-        let idx = n.saturating_sub(1).min(last);
-        let (Some(&start), Some(&count)) =
-            (m.element_start.get(idx), m.element_count.get(idx))
-        else {
-            return String::new();
-        };
-        // A `min="0"` element that matched nothing has an empty reference; an
-        // element that matched several tokens joins them with their whitespace.
-        let mut s = String::new();
-        for i in start..start + count {
-            let Some(t) = tokens.get(i) else { break };
-            if i > start && t.whitespace_before {
-                s.push(' ');
-            }
-            s.push_str(&t.token);
-        }
-        s
-    };
+    let r = Resolver { tokens, m, synth };
 
     // LT preserves case: when the marked text starts uppercase, a suggestion
     // that starts lowercase is capitalized to match.
@@ -699,22 +763,26 @@ fn render_match(
         .next()
         .map(|c| c.is_uppercase())
         .unwrap_or(false);
-    let replacements: Vec<String> = rule
-        .suggestions
-        .iter()
-        .map(|segs| {
-            let s = normalize_spaces(&expand(segs, &resolve));
+    // Each `<suggestion>` can expand to several replacements (a `<match>` with a
+    // regexp POS tag synthesizes multiple forms → their cross-product).
+    let mut replacements: Vec<String> = Vec::new();
+    for segs in &rule.suggestions {
+        for raw in expand(segs, &r) {
+            let s = normalize_spaces(&raw);
             // LT capitalizes a suggestion when the error is uppercase-initial,
             // *unless* the suggestion opens with a `\N` backref and one of its
             // `<match>`es converts case (PatternRuleMatcher.matchPreservesCase).
-            if upper_initial && !suppresses_capitalize(segs) {
+            let s = if upper_initial && !suppresses_capitalize(segs) {
                 capitalize_first(&s)
             } else {
                 s
+            };
+            if !replacements.contains(&s) {
+                replacements.push(s);
             }
-        })
-        .collect();
-    let message = render_message(&rule.message, &resolve);
+        }
+    }
+    let message = render_message(&rule.message, &r);
 
     Some(GrammarMatch {
         offset,
@@ -735,16 +803,72 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
-fn expand(segs: &[Seg], resolve: &dyn Fn(usize) -> String) -> String {
-    let mut s = String::new();
-    for seg in segs {
-        match seg {
-            Seg::Text(t) => s.push_str(t),
-            Seg::Ref(n) => s.push_str(&resolve(*n)),
-            Seg::Match(spec) => s.push_str(&apply_match_spec(spec, resolve)),
-        }
+/// Resolves `\N` backreferences and `<match>` synthesis against a concrete
+/// pattern match: the matched tokens, their element spans, and the synthesizer.
+struct Resolver<'a> {
+    tokens: &'a [AnalyzedTokenReadings],
+    m: &'a PatternMatch,
+    synth: Option<&'a Synthesizer>,
+}
+
+impl<'a> Resolver<'a> {
+    /// Map `no` to a pattern element index, clamping out-of-range refs to the
+    /// last matched element (LT `MatchState.setToken`). Returns `(start, count)`
+    /// of the tokens that element matched.
+    fn element(&self, no: usize) -> Option<(usize, usize)> {
+        let last = self.m.element_start.len().saturating_sub(1);
+        let idx = no.saturating_sub(1).min(last);
+        Some((*self.m.element_start.get(idx)?, *self.m.element_count.get(idx)?))
     }
-    s
+
+    /// Surface of the tokens matched by element `no` (a `\N` backreference). A
+    /// `min="0"` element that matched nothing yields the empty string; several
+    /// tokens are joined with their whitespace.
+    fn surface(&self, no: usize) -> String {
+        let Some((start, count)) = self.element(no) else {
+            return String::new();
+        };
+        let mut s = String::new();
+        for i in start..start + count {
+            let Some(t) = self.tokens.get(i) else { break };
+            if i > start && t.whitespace_before {
+                s.push(' ');
+            }
+            s.push_str(&t.token);
+        }
+        s
+    }
+
+    /// The first token matched by element `no` (its readings drive POS synthesis).
+    fn first_token(&self, no: usize) -> Option<&'a AnalyzedTokenReadings> {
+        let (start, count) = self.element(no)?;
+        if count == 0 {
+            return None;
+        }
+        self.tokens.get(start)
+    }
+}
+
+/// Expand a suggestion/segment list into every alternative it can produce (the
+/// cross-product over each segment's alternatives; only a synthesizing `<match>`
+/// yields more than one).
+fn expand(segs: &[Seg], r: &Resolver) -> Vec<String> {
+    let mut results = vec![String::new()];
+    for seg in segs {
+        let parts = match seg {
+            Seg::Text(t) => vec![t.clone()],
+            Seg::Ref(n) => vec![r.surface(*n)],
+            Seg::Match(spec) => apply_match_spec(spec, r),
+        };
+        let mut next = Vec::with_capacity(results.len() * parts.len());
+        for prefix in &results {
+            for p in &parts {
+                next.push(format!("{prefix}{p}"));
+            }
+        }
+        results = next;
+    }
+    results
 }
 
 /// LT suppresses its outer "capitalize when the error is uppercase-initial" for
@@ -778,21 +902,124 @@ fn normalize_spaces(s: &str) -> String {
     out
 }
 
-/// Render one `<match>`: surface of token `no`, `regexp` substitution, then case.
-fn apply_match_spec(spec: &MatchSpec, resolve: &dyn Fn(usize) -> String) -> String {
-    let source = resolve(spec.no);
-    let mut s = source.clone();
-    if let Some((re, rep)) = &spec.regex {
-        s = re.replace_all(&s, rep.as_str()).into_owned();
+/// Render one `<match>` to its alternative form(s): the surface of token `no`
+/// (or POS-synthesized form(s)), an optional `regexp` substitution, then case.
+/// Returns one string per alternative (only a regexp-POS synth yields several).
+fn apply_match_spec(spec: &MatchSpec, r: &Resolver) -> Vec<String> {
+    let source = r.surface(spec.no);
+    // Base form(s): POS synthesis if requested (and a synthesizer is available),
+    // otherwise the token's own surface.
+    let bases: Vec<String> = match (&spec.synth, r.synth, r.first_token(spec.no)) {
+        (Some(sy), Some(synth), Some(tok)) => {
+            let forms = synthesize_forms(sy, synth, tok);
+            // LT falls back to the original surface when synthesis yields nothing
+            // (MatchState.toFinalString: empty result set -> the token itself).
+            if forms.is_empty() {
+                vec![source.clone()]
+            } else {
+                forms
+            }
+        }
+        _ => vec![source.clone()],
+    };
+
+    bases
+        .into_iter()
+        .map(|base| {
+            let mut s = base;
+            if let Some((re, rep)) = &spec.regex {
+                s = re.replace_all(&s, rep.as_str()).into_owned();
+            }
+            match spec.case_conv {
+                CaseConv::None => s,
+                CaseConv::AllLower => s.to_lowercase(),
+                CaseConv::AllUpper => s.to_uppercase(),
+                CaseConv::StartLower => lower_first(&s),
+                CaseConv::StartUpper => upper_first(&s),
+                CaseConv::Preserve => preserve_case(&source, &s),
+            }
+        })
+        .collect()
+}
+
+/// Compile `p` so it must match a whole string (LT uses `Matcher.matches()`,
+/// which is anchored, to filter POS tags). `None` if `p` is not a valid regex.
+fn anchored_regex(p: &str) -> Option<Regex> {
+    Regex::new(&format!("^(?:{p})$")).ok()
+}
+
+/// Whether `re` (already anchored via [`anchored_regex`]) matches all of `s`.
+fn full_match(re: &Regex, s: &str) -> bool {
+    re.is_match(s).unwrap_or(false)
+}
+
+/// POS-synthesize the surface form(s) for a `<match postag=…>` against the
+/// reference token's readings (LT `MatchState.toFinalString`). Results are a
+/// sorted, de-duplicated set (LT pools them in a `TreeSet`).
+fn synthesize_forms(
+    sy: &SynthSpec,
+    synth: &Synthesizer,
+    tok: &AnalyzedTokenReadings,
+) -> Vec<String> {
+    // Readings carrying a usable lemma (skip sentence-boundary markers).
+    let readings: Vec<&matcher::AnalyzedToken> = tok
+        .readings
+        .iter()
+        .filter(|rd| {
+            rd.lemma.is_some()
+                && !matches!(rd.pos.as_deref(), Some("SENT_START" | "SENT_END" | "PARA_END"))
+        })
+        .collect();
+
+    let mut out = std::collections::BTreeSet::new();
+
+    // `<match …>lemma</match>`: inflect the given static lemma the same way the
+    // matched token is (each reading POS tag that passes the `postag` filter,
+    // optionally rewritten by `postag_replace`).
+    if let Some(lemma) = &sy.static_lemma {
+        for pos in readings
+            .iter()
+            .filter_map(|rd| rd.pos.as_deref())
+            .filter(|pos| full_match(&sy.postag_anchored, pos))
+        {
+            let target = if sy.has_replace {
+                sy.postag_re.replace(pos, sy.postag_replace.as_str()).into_owned()
+            } else {
+                pos.to_string()
+            };
+            out.extend(synth.synthesize(lemma, &target));
+        }
+        return out.into_iter().collect();
     }
-    match spec.case_conv {
-        CaseConv::None => s,
-        CaseConv::AllLower => s.to_lowercase(),
-        CaseConv::AllUpper => s.to_uppercase(),
-        CaseConv::StartLower => lower_first(&s),
-        CaseConv::StartUpper => upper_first(&s),
-        CaseConv::Preserve => preserve_case(&source, &s),
+
+    if sy.postag_regexp {
+        // Target tag: over readings whose POS tag fully matches `postag`, apply
+        // the `postag_replace` template; LT keeps the last such result
+        // (BaseSynthesizer.getTargetPosTag), falling back to the raw template.
+        let target = readings
+            .iter()
+            .filter_map(|rd| rd.pos.as_deref())
+            .filter(|pos| full_match(&sy.postag_anchored, pos))
+            .map(|pos| sy.postag_re.replace(pos, sy.postag_replace.as_str()).into_owned())
+            .last()
+            .unwrap_or_else(|| sy.postag_replace.clone());
+        // The tag universe is filtered with a full-string match (LT `matches()`).
+        let Some(target_re) = anchored_regex(&target) else {
+            return Vec::new();
+        };
+        for rd in &readings {
+            let lemma = rd.lemma.as_deref().unwrap_or_default();
+            out.extend(synth.synthesize_for_tags(lemma, |t| full_match(&target_re, t)));
+        }
+    } else {
+        // Concrete tag: LT synthesizes each reading's lemma and pools the forms.
+        for rd in &readings {
+            let lemma = rd.lemma.as_deref().unwrap_or_default();
+            out.extend(synth.synthesize(lemma, &sy.postag));
+        }
     }
+
+    out.into_iter().collect()
 }
 
 /// Force-lowercase the first character.
@@ -826,16 +1053,21 @@ fn preserve_case(original: &str, s: &str) -> String {
     }
 }
 
-fn render_message(items: &[MsgItem], resolve: &dyn Fn(usize) -> String) -> String {
+fn render_message(items: &[MsgItem], r: &Resolver) -> String {
     let mut s = String::new();
     for it in items {
         match it {
             MsgItem::Seg(Seg::Text(t)) => s.push_str(t),
-            MsgItem::Seg(Seg::Ref(n)) => s.push_str(&resolve(*n)),
-            MsgItem::Seg(Seg::Match(spec)) => s.push_str(&apply_match_spec(spec, resolve)),
+            MsgItem::Seg(Seg::Ref(n)) => s.push_str(&r.surface(*n)),
+            // A message is a single string; take the first alternative.
+            MsgItem::Seg(Seg::Match(spec)) => {
+                if let Some(first) = apply_match_spec(spec, r).into_iter().next() {
+                    s.push_str(&first);
+                }
+            }
             MsgItem::Suggestion(segs) => {
                 s.push('\u{201C}');
-                s.push_str(&expand(segs, resolve));
+                s.push_str(&expand(segs, r).into_iter().next().unwrap_or_default());
                 s.push('\u{201D}');
             }
         }
@@ -883,7 +1115,7 @@ mod tests {
             ("of", "of", "IN"),
             ("gone", "go", "VBN"),
         ]);
-        let ms = check_sentence(&rules, &toks, text, 0);
+        let ms = check_sentence(&rules, &toks, text, 0, None);
         assert_eq!(ms.len(), 1);
         let m = &ms[0];
         assert_eq!(m.rule_id, "MODAL_OF");
@@ -893,10 +1125,26 @@ mod tests {
     }
 
     #[test]
-    fn postag_match_needs_synth() {
-        // A `<match postag=…>` requires the synthesizer -> flagged, skipped.
+    fn postag_match_is_supported() {
+        // A `<match postag=…>` is now handled by the synthesizer, so the rule is
+        // supported (not flagged `match-synth`). Without a synthesizer at render
+        // time it falls back to the token surface (LT's empty-result fallback).
+        let doc = r#"<rules><category id="X"><rule id="R"><pattern>
+          <marker><token>x</token></marker></pattern>
+          <message>See <suggestion><match no="1" postag="VBZ"/></suggestion>.</message></rule></category></rules>"#;
+        let rules = parse_grammar_rules(doc).unwrap();
+        assert!(rules[0].unsupported.is_empty());
+        let text = "x";
+        let toks = sent_from(text, &[("x", "x", "NN")]);
+        let ms = check_sentence(&rules, &toks, text, 0, None);
+        assert_eq!(ms[0].replacements, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn add_article_match_is_flagged() {
+        // The `+DT` "insert an article" synthesis mode is not implemented.
         let doc = r#"<rules><rule><pattern><token>x</token></pattern>
-          <message>See <suggestion><match no="1" postag="VBZ"/></suggestion>.</message></rule></rules>"#;
+          <message>See <suggestion><match no="1" postag="+DT"/></suggestion>.</message></rule></rules>"#;
         let rules = parse_grammar_rules(doc).unwrap();
         assert!(rules[0].unsupported.contains(&"match-synth".to_string()));
     }
@@ -912,7 +1160,7 @@ mod tests {
         assert!(rules[0].unsupported.is_empty());
         let text = "teh cat";
         let toks = sent_from(text, &[("teh", "teh", "NN"), ("cat", "cat", "NN")]);
-        let ms = check_sentence(&rules, &toks, text, 0);
+        let ms = check_sentence(&rules, &toks, text, 0, None);
         assert_eq!(ms[0].replacements, vec!["teh".to_string()]);
     }
 
@@ -928,7 +1176,7 @@ mod tests {
         let rules = parse_grammar_rules(doc).unwrap();
         let text = "in while .";
         let toks = sent_from(text, &[("in", "in", "IN"), ("while", "while", "NN"), (".", ".", "PCT")]);
-        let ms = check_sentence(&rules, &toks, text, 0);
+        let ms = check_sentence(&rules, &toks, text, 0, None);
         assert_eq!(ms[0].replacements, vec!["in a while".to_string()]);
     }
 
@@ -942,7 +1190,7 @@ mod tests {
         let rules = parse_grammar_rules(doc).unwrap();
         let text = "dutch people";
         let toks = sent_from(text, &[("dutch", "dutch", "JJ"), ("people", "people", "NNS")]);
-        let ms = check_sentence(&rules, &toks, text, 0);
+        let ms = check_sentence(&rules, &toks, text, 0, None);
         assert_eq!(ms[0].replacements, vec!["Dutch".to_string()]);
     }
 
@@ -969,7 +1217,7 @@ mod tests {
         let rules = parse_grammar_rules(doc).unwrap();
         let text = "iphone colour";
         let toks = sent_from(text, &[("iphone", "iphone", "NN"), ("colour", "colour", "NN")]);
-        let ms = check_sentence(&rules, &toks, text, 0);
+        let ms = check_sentence(&rules, &toks, text, 0, None);
         // startupper -> "Iphone"; regex our->or -> "color"
         let repls: Vec<_> = ms.iter().flat_map(|m| m.replacements.clone()).collect();
         assert!(repls.contains(&"Iphone".to_string()), "{repls:?}");

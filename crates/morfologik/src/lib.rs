@@ -5,6 +5,8 @@
 
 pub mod dict;
 pub mod fsa;
+pub mod synth;
 
 pub use dict::{Dictionary, DictEntry, Encoder};
 pub use fsa::{Cfsa2, FsaError};
+pub use synth::Synthesizer;

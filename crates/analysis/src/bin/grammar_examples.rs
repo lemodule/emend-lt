@@ -3,17 +3,22 @@
 //! many fire at the marked span with the expected replacements.
 //!
 //! Usage: grammar-examples <english.dict> <disambiguation.xml> <grammar.xml>
+//!          [<english_synth.dict> <english_tags.txt>]
 
 use std::process::ExitCode;
 
 use analysis::grammar::{check_one, parse_grammar_rules};
 use analysis::{parse_disambig_rules, Analyzer};
 use matcher::{expand, parse_entity_defs};
+use morfologik::Synthesizer;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("usage: grammar-examples <english.dict> <disambiguation.xml> <grammar.xml>");
+        eprintln!(
+            "usage: grammar-examples <english.dict> <disambiguation.xml> <grammar.xml> \
+             [<english_synth.dict> <english_tags.txt>]"
+        );
         return ExitCode::FAILURE;
     }
     let dict_path = &args[1];
@@ -35,6 +40,21 @@ fn main() -> ExitCode {
     let gram_defs = parse_entity_defs(&gram_xml);
     let gram_rules = parse_grammar_rules(&expand(&gram_xml, &gram_defs)).unwrap();
 
+    // Optional synthesizer (english_synth.dict + english_tags.txt) for
+    // `<match postag=…>` rendering.
+    let synth = if args.len() >= 6 {
+        let sdict = std::fs::read(&args[4]).expect("read english_synth.dict");
+        let sinfo = std::fs::read_to_string(
+            args[4].strip_suffix(".dict").map(|s| format!("{s}.info")).unwrap_or_default(),
+        )
+        .unwrap_or_default();
+        let stags = std::fs::read_to_string(&args[5]).expect("read english_tags.txt");
+        Some(Synthesizer::load(&sdict, &sinfo, &stags).expect("load synthesizer"))
+    } else {
+        None
+    };
+    let synth_ref = synth.as_ref();
+
     let total_rules = gram_rules.len();
     let supported: Vec<_> = gram_rules.iter().filter(|r| r.unsupported.is_empty()).collect();
 
@@ -46,7 +66,7 @@ fn main() -> ExitCode {
             // One sentence per example.
             let mut toks = analyzer.raw(&ex.text);
             analysis::disambig::apply_all(&dis_rules, &mut toks);
-            let matches = check_one(rule, &toks, &ex.text, 0);
+            let matches = check_one(rule, &toks, &ex.text, 0, synth_ref);
 
             match (&ex.correction, ex.marker) {
                 (Some(corr), Some((moff, mlen))) => {

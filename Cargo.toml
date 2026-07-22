@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/morfologik", "crates/segmenter", "crates/tokenizer", "crates/tagger", "crates/matcher", "crates/analysis"]
+members = ["crates/morfologik", "crates/segmenter", "crates/tokenizer", "crates/tagger", "crates/matcher", "crates/analysis", "crates/server"]
 
 [workspace.package]
 edition = "2021"

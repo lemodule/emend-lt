@@ -60,6 +60,23 @@ serving the same `/v2/check` HTTP contract. **English-first.** Oracle for every 
   edit-distance-1→2 dictionary search ranked by stored frequency — **not** the full Morfologik
   speller (bounded FSA-Levenshtein + replacement pairs), so their ordering/coverage is approximate.
 
+- **Phase 2 — HTTP server** (`crates/server`, `bin/emend-server`) — wraps the whole pipeline behind
+  LanguageTool's `/v2` contract with `axum`. An `Engine` loads every data file **once**
+  (tagger, disambiguation rules, grammar rules, segmenter, optional synthesizer, optional spelling
+  rule) and `Engine::check` runs the exact per-sentence pipeline the `check-text`/`spell-text` bins
+  do (segment → raw analyze → disambiguate → grammar (+synth) → spelling), **merging** grammar and
+  spelling matches, sorting document-order. `POST /v2/check` (form: `text`, `language`, `level`,
+  `disabledRules`, `disabledCategories`) emits the LT JSON schema — the app's load-bearing
+  `matches[].{offset,length,message,replacements[].value,rule.id,rule.category.id}` plus a computed
+  `context`; `disabledRules`/`disabledCategories` filter post-hoc. `GET /v2/languages` returns the
+  English set. `--allow-origin` echoes `Access-Control-Allow-Origin` (+ preflight). Validated against
+  the **live Java LT 6.6 server** (running as oracle on `:8010`): over a mixed corpus **100%
+  precision (0 false positives) / ~71% recall** — every span emitted is one Java also flags; the
+  misses are the not-yet-ported hand-coded rules (`EN_A_VS_AN`, `EN_CONTRACTION_SPELLING`, …, #4) and
+  chunker-dependent rules (#3), i.e. false *negatives* by design. Server output for the grammar layer
+  is identical to `check-text`. 4 unit tests. `--data-dir <DIR>` fills every path from the
+  conventional filenames, so a fully-extracted dir needs only `--data-dir`.
+
 Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on `main`).
 
 ## Done (this phase)
@@ -75,6 +92,9 @@ Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on 
   static-lemma), cross-product suggestion expansion. +127 rules (3,789 → 3,916). See summary above.
 - [x] **1.5 Spelling detection** (`MORFOLOGIK_RULE_EN_US`) — byte-exact `is_misspelled` (0/420 vs
   server) + rule layer; 46/47 exact spans, 0 FP. Suggestions best-effort ED1→2. See summary above.
+- [x] **Phase 2 HTTP server** (`crates/server`, `bin/emend-server`) — `axum` `/v2/check` +
+  `/v2/languages`, load-once `Engine`, grammar+spelling merged, `disabledRules`/`disabledCategories`,
+  `--allow-origin`. 100% precision / ~71% recall vs live Java LT. See summary above.
 
 ## What's left, in priority order
 
@@ -108,19 +128,29 @@ Details per phase: `docs/phase1-english.md`. Nothing is committed yet (still on 
     `replacements[]` byte-exact. Current suggestions are approximate ED1→2. Also gives LT's
     **run-on multi-word** suggestion span (`novell about`), the one detection-span diff.
   - [ ] **`MultitokenSpellerFilter`** (#2) now unblocked — it reuses this speller.
-- [ ] **6. Phase 2 — HTTP server** — wrap the pipeline in `axum`/`hyper` exposing `POST /v2/check`
-  + `GET /v2/languages`, honoring `level`, `disabledRules`/`disabledCategories`, echoing
-  `--allow-origin`. This is what the app actually calls (see contract below).
+- [x] **6. Phase 2 — HTTP server** (`crates/server`, `bin/emend-server`) — **landed.** `axum`
+  `POST /v2/check` + `GET /v2/languages`, `disabledRules`/`disabledCategories`, `--allow-origin`.
+  See summary above. `level` is read but a no-op today: `level=picky` would enable the
+  `default="off"`/`tags="picky"` rules, which the engine currently **compiles out as unsupported**
+  (`grammar.rs` flags them `disabled`) — to serve picky, split that flag from `unsupported` and gate
+  it on the request level. The app only sends `level=default`. Also **not yet done**: cross-subsystem
+  overlap filtering (grammar's `filter_overlaps` runs within grammar; spelling matches are merged
+  but not de-overlapped against grammar — LT does this globally), and UTF-16 offsets (matches use
+  Unicode-scalar char offsets, identical to LT for BMP/English; non-BMP like emoji would drift).
 - [ ] **7. Phase 3 — differential harness** — drive `/v2/check` parity % (precision/recall over a
-  corpus) as the headline metric; already prototyped ad-hoc in `bin/check-text` vs the server.
+  corpus) as the headline metric. Prototyped: the parity script diffs `emend-server` vs the live
+  Java LT server span-for-span (100% precision / ~71% recall on the smoke corpus). **Next:** promote
+  it to a checked-in bin/test over a real corpus, tracking precision/recall/rule-coverage per run.
 
-**Recommended next:** the **HTTP server** (#6) — grammar, disambiguation, the synthesizer, and
-spelling detection are all in place and validated, so the highest-leverage step is wrapping the
-pipeline in `axum`/`hyper` exposing `POST /v2/check` + `GET /v2/languages`. That makes the whole
-engine exercisable by the app **and** turns the differential harness (#7) into a continuous parity
-metric over real corpora (rather than the current per-rule / ad-hoc bins). Byte-exact **spelling
-suggestions** (the real Morfologik speller) and the small `<match>` tails (`+DT`, `<token>`-level)
-are lower-leverage polish that can follow.
+**Recommended next:** the **differential harness** (#7) — the HTTP server (#6) just landed and is
+already diffed ad-hoc against the live Java LT server (100% precision / ~71% recall on a smoke
+corpus). Promote that diff to a checked-in bin/test over a **real corpus**, reporting
+precision/recall/rule-coverage each run, so every subsequent change (porting a `<filter>`, a
+hand-coded rule, the chunker) is measured as a parity delta rather than a per-rule example rate.
+With the harness in place, the highest-recall wins are the **hand-coded English rules** (#4 —
+`EN_A_VS_AN`, `EN_CONTRACTION_SPELLING`, … are the bulk of the current recall gap) and the **Java
+`<filter>` classes** (#2). Byte-exact **spelling suggestions** (the real Morfologik speller) and the
+small `<match>` tails (`+DT`, `<token>`-level) remain lower-leverage polish.
 
 ## Key findings to remember (things that bit us / corrections to the roadmap)
 
@@ -191,6 +221,17 @@ are lower-leverage polish that can follow.
   ```
 - **Running LT HTTP server** (for `/v2/check` oracle):
   `"$JRE/java" -cp "$CP" org.languagetool.server.HTTPServer --port 8099 --allow-origin "*"`.
+  (Note: a live Java LT instance may already be bound to `:8010` — it makes a fine oracle. Run
+  `emend-server` on a **different** port to diff; localhost resolves IPv6-first, so a `:8010`
+  collision can silently route to the Java one.)
+- **Running our server** (`crates/server`): `cargo build --release`, then
+  `./target/release/emend-server --data-dir <DIR> --port 8011 --allow-origin "*"`, where `<DIR>`
+  holds the extracted files under their conventional names (`english.dict` + `.info` + `added.txt` +
+  `removed.txt`, `disambiguation.xml`, `grammar.xml`, `segment.srx`, and optionally
+  `english_synth.dict`/`.info` + `english_tags.txt`, `en_US.dict`/`.info` + `ignore.txt` +
+  `spelling.txt` + `spelling_en-US.txt` + `multiwords.txt` + `prohibit.txt`). Individual `--dict`
+  `--grammar` … flags override any convention. Parity smoke check: `POST` the same text to
+  `emend-server` and the Java LT server and diff `matches[].{offset,length,rule.id}`.
   Note: JDK 17 lives at `/usr/bin/javac`/`javap` (the bundled JRE has no compiler); `javap -c` on
   `libs/languagetool-core.jar` is the authority when action semantics are unclear (LT ships no
   `.java`).

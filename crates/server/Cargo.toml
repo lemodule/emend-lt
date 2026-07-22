@@ -1,0 +1,22 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Phase 2 HTTP server: wraps the analysis pipeline behind LanguageTool's /v2/check + /v2/languages contract (axum)"
+
+[dependencies]
+analysis = { path = "../analysis" }
+tokenizer = { path = "../tokenizer" }
+tagger = { path = "../tagger" }
+matcher = { path = "../matcher" }
+segmenter = { path = "../segmenter" }
+morfologik = { path = "../morfologik" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "emend-server"
+path = "src/main.rs"

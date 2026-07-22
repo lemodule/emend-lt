@@ -215,3 +215,47 @@ match-anything token and `ADVERB_VERB_ADVERB_REPETITION` fired ~360× on random 
 - 1.5 hand-coded English rules (`EN_CONTRACTION_SPELLING`, `EN_A_VS_AN`, …).
 - Known raw-tagger edge (not disambiguation): hyphenated plurals like `four-year-olds` get one
   fewer NNS reading than LT (LT also emits a self-lemma `four-year-olds/NNS`).
+
+## Phase 2 — HTTP server ✅ done & verified
+
+`crates/server` (`bin/emend-server`) wraps the whole pipeline behind LanguageTool's `/v2` contract
+using `axum`. Structure:
+
+- **`engine.rs`** — an `Engine` that `load`s every data file **once** (tagger, disambiguation rules,
+  grammar rules, segmenter, optional synthesizer, optional spelling rule) from an `EngineConfig` of
+  paths. `Engine::check(text, keep)` runs the identical per-sentence pipeline the `check-text` /
+  `spell-text` bins do — segment → `Analyzer::raw` → `disambig::apply_all` → `grammar::check_sentence`
+  (+ synthesizer) → `SpellRule::check_sentence` — **merging** grammar and spelling `GrammarMatch`es,
+  filtering by the `keep(rule_id, category_id)` predicate, sorting document-order (offset, then wider
+  first). The `Analyzer` borrows the tagger, so it's rebuilt per request (cheap — just the tokenizer
+  wrapper); everything heavy is owned by the `Engine`.
+- **`http.rs`** — the router + JSON schema. `POST /v2/check` (form `text`/`language`/`level`/
+  `disabledRules`/`disabledCategories`) → `{software, language, matches[]}`; each match carries the
+  app's load-bearing `offset,length,message,replacements[].value,rule.id,rule.category.id` plus a
+  computed 40-char `context`. `disabledRules`/`disabledCategories` are comma-split into the `keep`
+  predicate. `GET /v2/languages` returns the English set. `--allow-origin` sets
+  `Access-Control-Allow-Origin` on every response and answers the CORS preflight (`OPTIONS`).
+- **`main.rs`** — manual flag parsing (no clap); `--data-dir <DIR>` fills any unset path from the
+  conventional filenames, individual flags override. Graceful `ctrl-c` shutdown.
+
+**Verified** against the live **Java LT 6.6** HTTP server used as oracle (bound on `:8010`;
+`emend-server` on `:8011`). Over a 10-sentence mixed corpus, span-for-span:
+
+| metric | value |
+|---|---|
+| precision (mine's spans that Java also flags) | **100%** (0 false positives) |
+| recall (Java's spans mine also flags) | ~71% |
+
+Every span emitted is one Java also flags — the recall gap is exactly the not-yet-ported hand-coded
+rules (`EN_A_VS_AN`, `EN_CONTRACTION_SPELLING`, …) and chunker-dependent rules, i.e. false
+*negatives* by design ("never silently mis-apply"). The grammar layer's output is identical to
+`check-text`; spelling is the merged `MORFOLOGIK_RULE_EN_US`. 4 unit tests (pure helpers).
+
+**Gotcha:** `localhost` resolves **IPv6-first** — with a Java LT already on `:8010`, an
+`emend-server` also on `:8010` (IPv4 `*`) coexists but `curl localhost:8010` silently hits the Java
+one. Run on distinct ports when diffing.
+
+**Known non-goals for the MVP** (all noted in NEXT.md §6): `level=picky` is read but a no-op (the
+engine compiles `default="off"`/`tags="picky"` rules out as `unsupported`); no cross-subsystem
+overlap filter between grammar and spelling; offsets are Unicode-scalar chars (== LT for BMP text,
+drift only on non-BMP like emoji vs LT's UTF-16 units).
